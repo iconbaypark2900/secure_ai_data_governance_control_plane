@@ -1,0 +1,132 @@
+{
+    "project": {
+      "name": "Secure AI & Data Governance Control Plane",
+      "version": "0.1.0",
+      "domain": "secure_ai_data_governance_control_plane",
+      "description": "A Motia-orchestrated control plane that centralizes policy enforcement, routing, and audit for AI, data access, and tool usage across regulated enterprises.",
+      "objectives": [
+        "Centralize policies for AI usage, data access, model routing, and tools",
+        "Provide deterministic, auditable flows for every AI and data operation",
+        "Enforce regulatory and data residency constraints",
+        "Abstract over multiple model providers and internal models with policy-aware routing",
+        "Integrate into existing identity, security, and data governance ecosystems"
+      ],
+      "core_tools": {
+        "orchestration": ["motia"],
+        "backend": ["fastapi"],
+        "policy_engine": ["opa"],
+        "secrets_management": ["vault"],
+        "datastores": ["postgresql", "opensearch"],
+        "identity": ["oidc_saml"],
+        "observability": ["prometheus", "grafana", "langfuse"],
+        "ai_integration": ["generic_llm_apis", "internal_model_endpoints"],
+        "vector_kg_connectors": ["qdrant", "opensearch_vector", "neo4j"]
+      },
+      "services": [
+        {
+          "name": "policy_management_service",
+          "responsibilities": [
+            "Store and version Rego policies",
+            "Expose UI and API for policy authors",
+            "Validate and test policies before activation"
+          ]
+        },
+        {
+          "name": "governance_gateway_service",
+          "responsibilities": [
+            "Act as proxy for AI and data access requests",
+            "Authenticate and enrich requests with identity and context",
+            "Call OPA to evaluate applicable policies",
+            "Route, transform, or block requests accordingly"
+          ]
+        },
+        {
+          "name": "model_tool_router_service",
+          "responsibilities": [
+            "Map logical model names to physical endpoints",
+            "Select appropriate model/provider based on sensitivity, jurisdiction, and policy",
+            "Support gradual rollout and fallback"
+          ]
+        },
+        {
+          "name": "context_filter_redaction_service",
+          "responsibilities": [
+            "Apply PII/PHI/PCI redaction and field-level filtering",
+            "Enforce dataset and column-level access rules before model invocations"
+          ]
+        },
+        {
+          "name": "dataset_catalog_service",
+          "responsibilities": [
+            "Maintain inventory of datasets, indexes, and tools with labels",
+            "Expose metadata to policies and UI",
+            "Ensure only approved assets are accessible per use case"
+          ]
+        },
+        {
+          "name": "audit_monitoring_service",
+          "responsibilities": [
+            "Log all requests, decisions, routes, and data touches",
+            "Export events to SIEM and compliance reporting",
+            "Provide forensics and incident response views"
+          ]
+        }
+      ],
+      "workflows": [
+        {
+          "id": "ai_request_evaluation",
+          "triggers": ["api_call"],
+          "steps": [
+            "authenticate_request",
+            "enrich_with_identity_context",
+            "evaluate_policies",
+            "apply_redaction_filters",
+            "route_to_model_or_dataset",
+            "log_decision_and_response"
+          ]
+        },
+        {
+          "id": "rag_governance",
+          "triggers": ["api_call"],
+          "steps": [
+            "resolve_allowed_datasets",
+            "rewrite_or_constrain_query",
+            "execute_retrieval_under_policy",
+            "log_retrieval_scope"
+          ]
+        },
+        {
+          "id": "model_registry_governance",
+          "triggers": ["manual", "api"],
+          "steps": [
+            "register_model_metadata",
+            "assign_policies_and_risk_rating",
+            "enable_for_allowed_use_cases"
+          ]
+        },
+        {
+          "id": "incident_forensics",
+          "triggers": ["manual"],
+          "steps": [
+            "search_audit_log",
+            "reconstruct_flows",
+            "export_evidence_package"
+          ]
+        }
+      ],
+      "security": {
+        "auth": "oidc_saml",
+        "policy_engine": "opa",
+        "secret_management": "vault",
+        "logging_store": "opensearch_or_siem",
+        "zero_trust_aligned": true
+      },
+      "non_functional": {
+        "low_latency_overhead": true,
+        "scalability": "horizontal_gateways_and_policy_engines",
+        "high_availability": true,
+        "policy_versioning": true,
+        "vendor_neutral": true
+      }
+    }
+  }

@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Project id="secure-ai-data-governance-control-plane" version="0.1.0">
+  <Metadata>
+    <Name>Secure AI &amp; Data Governance Control Plane</Name>
+    <Domain>secure_ai_data_governance_control_plane</Domain>
+    <Description>
+      A Motia-orchestrated control plane that centralizes policies, routing, and audit
+      for AI, data, and tool usage in regulated enterprises.
+    </Description>
+  </Metadata>
+
+  <Objectives>
+    <Objective>Centralize policies for AI usage, data access, and tools</Objective>
+    <Objective>Provide deterministic, auditable flows</Objective>
+    <Objective>Enforce regulatory and residency constraints</Objective>
+    <Objective>Abstract over multiple model providers with policy-aware routing</Objective>
+    <Objective>Integrate into existing security and governance ecosystems</Objective>
+  </Objectives>
+
+  <CoreTools>
+    <Orchestration>motia</Orchestration>
+    <Backend>fastapi</Backend>
+    <PolicyEngine>opa</PolicyEngine>
+    <SecretsManagement>vault</SecretsManagement>
+    <Datastore>postgresql</Datastore>
+    <Datastore>opensearch</Datastore>
+    <Identity>oidc_saml</Identity>
+    <VectorConnector>qdrant</VectorConnector>
+    <VectorConnector>opensearch_vector</VectorConnector>
+    <GraphConnector>neo4j</GraphConnector>
+    <ObservabilityTool>prometheus</ObservabilityTool>
+    <ObservabilityTool>grafana</ObservabilityTool>
+    <ObservabilityTool>langfuse</ObservabilityTool>
+  </CoreTools>
+
+  <Services>
+    <Service name="policy_management_service">
+      <Responsibility>Store and version Rego policies</Responsibility>
+      <Responsibility>Provide UI and API for authors</Responsibility>
+    </Service>
+    <Service name="governance_gateway_service">
+      <Responsibility>Proxy AI and data requests</Responsibility>
+      <Responsibility>Authenticate and enrich context</Responsibility>
+      <Responsibility>Evaluate policies and enforce outcomes</Responsibility>
+    </Service>
+    <Service name="model_tool_router_service">
+      <Responsibility>Map logical models to physical endpoints</Responsibility>
+      <Responsibility>Select endpoints based on policy and context</Responsibility>
+    </Service>
+    <Service name="context_filter_redaction_service">
+      <Responsibility>Apply redaction and field-level filters</Responsibility>
+    </Service>
+    <Service name="dataset_catalog_service">
+      <Responsibility>Maintain labeled dataset and tool inventory</Responsibility>
+    </Service>
+    <Service name="audit_monitoring_service">
+      <Responsibility>Log all activity</Responsibility>
+      <Responsibility>Feed SIEM and provide forensics</Responsibility>
+    </Service>
+  </Services>
+
+  <Workflows>
+    <Workflow id="ai_request_evaluation">
+      <Trigger>api_call</Trigger>
+      <Step>authenticate_request</Step>
+      <Step>enrich_with_identity_context</Step>
+      <Step>evaluate_policies</Step>
+      <Step>apply_redaction_filters</Step>
+      <Step>route_to_model_or_dataset</Step>
+      <Step>log_decision_and_response</Step>
+    </Workflow>
+    <Workflow id="rag_governance">
+      <Trigger>api_call</Trigger>
+      <Step>resolve_allowed_datasets</Step>
+      <Step>rewrite_or_constrain_query</Step>
+      <Step>execute_retrieval_under_policy</Step>
+      <Step>log_retrieval_scope</Step>
+    </Workflow>
+    <Workflow id="model_registry_governance">
+      <Trigger>manual</Trigger>
+      <Trigger>api</Trigger>
+      <Step>register_model_metadata</Step>
+      <Step>assign_policies_and_risk_rating</Step>
+      <Step>enable_for_allowed_use_cases</Step>
+    </Workflow>
+    <Workflow id="incident_forensics">
+      <Trigger>manual</Trigger>
+      <Step>search_audit_log</Step>
+      <Step>reconstruct_flows</Step>
+      <Step>export_evidence_package</Step>
+    </Workflow>
+  </Workflows>
+
+  <Security>
+    <Auth>oidc_saml</Auth>
+    <PolicyEngine>opa</PolicyEngine>
+    <SecretManagement>vault</SecretManagement>
+    <LoggingStore>opensearch_or_siem</LoggingStore>
+    <ZeroTrustAligned>true</ZeroTrustAligned>
+  </Security>
+
+  <NonFunctional>
+    <LowLatencyOverhead>true</LowLatencyOverhead>
+    <Scalability>horizontal_gateways_and_policy_engines</Scalability>
+    <HighAvailability>true</HighAvailability>
+    <PolicyVersioning>true</PolicyVersioning>
+    <VendorNeutral>true</VendorNeutral>
+  </NonFunctional>
+</Project>
