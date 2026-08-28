@@ -144,7 +144,7 @@ class TestCombination:
 
 class TestDeclaration:
     def test_the_proxy_declares_exactly_what_it_implements(self) -> None:
-        assert {"limit", "watermark", "require_purpose"} == SATISFIABLE
+        assert {"limit", "watermark", "require_purpose", "route"} == SATISFIABLE
 
     def test_obligations_of_filters_by_type(self) -> None:
         obligations = [{"type": "limit", "max_rows": 1}, {"type": "watermark", "text": "x"}]

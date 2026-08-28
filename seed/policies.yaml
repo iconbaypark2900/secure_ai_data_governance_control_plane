@@ -137,6 +137,31 @@ policies:
       - type: log
         level: info
 
+  - key: route-regulated-data-to-eu-models
+    name: Regulated data is inferred inside the EU
+    description: >
+      The redirect rather than the refusal. Health and payment data may be
+      reasoned over -- on a model that runs where the data is allowed to be.
+      Constraining by attribute rather than naming a model means adding an EU
+      model later needs no policy change, and losing the last one is a denial
+      rather than a silent fallback to somewhere it should not go.
+    effect: allow
+    priority: 400
+    tags: [residency, gdpr, hipaa]
+    match:
+      all:
+        # Only model calls. Routing a database read to a model is meaningless,
+        # and a routing rule that forgets to say so quietly intercepts every
+        # ordinary read of the same data.
+        - action: {in: [infer, embed, return]}
+        - classifications: {any_of: [phi, pci, pii.ssn]}
+    obligations:
+      - type: route
+        require: {region: eu}
+      - type: redact
+        labels: [pii.ssn, pci.card_number]
+        strategy: mask
+
   - key: allow-agents-external-inference-scrubbed
     name: External inference on de-identified text only
     description: >

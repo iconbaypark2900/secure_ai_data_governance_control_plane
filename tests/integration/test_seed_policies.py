@@ -32,7 +32,10 @@ async def reference(session):
     service = CatalogService(session)
     for entry in catalog["assets"]:
         asset, _ = await service.upsert_asset(
-            entry["urn"], name=entry.get("name"), kind=entry.get("kind")
+            entry["urn"],
+            name=entry.get("name"),
+            kind=entry.get("kind"),
+            attributes=entry.get("attributes"),
         )
         for label in entry.get("classifications", []):
             await service.set_classification(
@@ -200,6 +203,74 @@ class TestOrdinaryWork:
             payload="oops ghp_" + "a" * 36,
         )
         assert response.effect == "deny"
+
+
+class TestResidencyRouting:
+    """The redirect, not the refusal.
+
+    The shipped set could previously only say no to regulated data meeting the
+    wrong model. It now says where to send it instead.
+    """
+
+    async def test_regulated_data_is_routed_to_an_eu_model(self, reference) -> None:
+        response = await ask(
+            reference,
+            principal="agent:analytics_copilot",
+            action="infer",
+            resource="pg://public.payments",
+            context={"destination": "external"},
+        )
+        assert response.effect == "allow"
+        assert response.route is not None
+        assert response.route["target"] == "model://internal/llama-3-70b"
+
+    async def test_an_ordinary_read_of_the_same_data_is_not_routed(self, reference) -> None:
+        """Routing a database read to a model is meaningless.
+
+        A routing rule that forgets to scope itself quietly intercepts every
+        ordinary read of the data it names -- which is exactly what the first
+        draft of this policy did.
+        """
+        response = await ask(
+            reference,
+            principal="user:analyst",
+            type="user",
+            action="read",
+            resource="pg://public.customers",
+            payload="jane.doe@acme.com",
+        )
+        assert response.route is None
+        assert response.payload == "jane.doe@acme.com"
+
+    async def test_the_models_are_registered_as_catalog_assets(self, reference, session) -> None:
+        from control_plane.catalog.service import CatalogService
+
+        candidates = await CatalogService(session).model_candidates()
+        assert {c.urn for c in candidates} == {
+            "model://internal/llama-3-70b",
+            "model://azure/gpt-4o-eu",
+            "model://openai/gpt-4o",
+        }
+
+    async def test_losing_every_eu_model_denies_rather_than_falling_back(
+        self, reference, session
+    ) -> None:
+        """The property that makes constraint-based routing safe."""
+        from control_plane.catalog.service import CatalogService
+
+        catalog = CatalogService(session)
+        for urn in ("model://internal/llama-3-70b", "model://azure/gpt-4o-eu"):
+            await catalog.delete_asset(urn)
+
+        response = await ask(
+            reference,
+            principal="agent:analytics_copilot",
+            action="infer",
+            resource="pg://public.payments",
+            context={"destination": "external"},
+        )
+        assert response.effect == "deny"
+        assert "no registered model satisfies" in response.reason
 
 
 class TestHumanInTheLoop:

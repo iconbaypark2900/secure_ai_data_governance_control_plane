@@ -18,3 +18,4 @@ costs — the last part being the one that is never reconstructible afterwards.
 | [0010](0010-declare-only-what-is-implemented.md) | Implement an obligation or remove it; nothing in between |
 | [0011](0011-api-keys-use-a-fast-keyed-hash.md) | Stop paying 82 ms of Argon2 to protect a 192-bit secret |
 | [0012](0012-streaming-governance.md) | Govern streamed answers behind a hold-back window |
+| [0013](0013-routing-is-a-policy-outcome.md) | Make routing an obligation, and models catalog assets |

@@ -47,9 +47,12 @@ from control_plane_sdk import (
 
 from pep.reverse_proxy.obligations import (
     SATISFIABLE,
+    Backend,
     apply_request_obligations,
     apply_response_obligations,
     check_purpose,
+    load_backends,
+    routed_target,
 )
 from pep.reverse_proxy.streaming import (
     DEFAULT_GOVERN_EVERY,
@@ -84,6 +87,18 @@ STREAM_MODE = os.getenv("PEP_STREAM_MODE", "window").lower()
 STREAM_WINDOW_CHARS = int(os.getenv("PEP_STREAM_WINDOW_CHARS", DEFAULT_WINDOW_CHARS))
 STREAM_GOVERN_EVERY = int(os.getenv("PEP_STREAM_GOVERN_EVERY", DEFAULT_GOVERN_EVERY))
 
+#: Model URN -> endpoint, for requests the control plane routes. Keyed by the URN
+#: it resolves to, so both sides agree on identity without the control plane ever
+#: holding a credential.
+#:
+#:   {"model://internal/llama-3-70b": {"base_url": "http://llama:8000",
+#:                                     "model": "llama-3-70b",
+#:                                     "api_key": "..."}}
+MODEL_BACKENDS = load_backends(os.getenv("PEP_MODEL_BACKENDS", ""))
+
+#: Where a request goes when no policy routed it.
+DEFAULT_BACKEND = Backend(base_url=UPSTREAM_URL, api_key=UPSTREAM_KEY)
+
 _control_plane: AsyncControlPlaneClient | None = None
 _upstream: httpx.AsyncClient | None = None
 
@@ -99,7 +114,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         # authority, it does not guess.
         fail_closed=os.getenv("PEP_FAIL_CLOSED", "true").lower() != "false",
     )
-    _upstream = httpx.AsyncClient(base_url=UPSTREAM_URL, timeout=120.0)
+    # No base_url: the endpoint is chosen per request, because a policy may
+    # route this one somewhere other than the default.
+    _upstream = httpx.AsyncClient(timeout=120.0)
     yield
     await _control_plane.aclose()
     await _upstream.aclose()
@@ -149,6 +166,25 @@ def _replace_messages_text(messages: list[dict[str, Any]], governed: str) -> lis
         else:
             rebuilt.append(dict(message))
     return rebuilt
+
+
+def _select_backend(obligations: list[dict[str, Any]]) -> tuple[Backend, str | None]:
+    """The endpoint to use, or a refusal reason.
+
+    A target this proxy has no configuration for is a duty it cannot discharge,
+    so it refuses rather than quietly falling back to the default -- falling back
+    would send the data to exactly the model the policy steered it away from.
+    """
+    target = routed_target(obligations)
+    if target is None:
+        return DEFAULT_BACKEND, None
+    backend = MODEL_BACKENDS.get(target)
+    if backend is None:
+        return DEFAULT_BACKEND, (
+            f"policy routed this request to {target}, which this enforcement "
+            f"point has no backend configured for; add it to PEP_MODEL_BACKENDS"
+        )
+    return backend, None
 
 
 def _denied(decision: Decision, direction: str) -> JSONResponse:
@@ -228,10 +264,21 @@ async def chat_completions(
         upstream_body, list(inbound.obligations)
     )
 
+    backend, backend_error = _select_backend(list(inbound.obligations))
+    if backend_error is not None:
+        return _denied(Decision.denial(backend_error), "inbound")
+    if backend.model:
+        # The logical model the caller named is not necessarily what the chosen
+        # backend calls itself.
+        upstream_body["model"] = backend.model
+    if routed_target(list(inbound.obligations)):
+        request_notes.append(f"routed to {routed_target(list(inbound.obligations))}")
+
     if bool(body.get("stream")):
         return StreamingResponse(
             _stream(
                 upstream_body,
+                backend=backend,
                 model=model,
                 principal=principal,
                 principal_type=x_principal_type or "service",
@@ -249,12 +296,9 @@ async def chat_completions(
         completion = _echo_completion(upstream_body, model)
     else:
         upstream_response = await _upstream.post(
-            "/v1/chat/completions",
+            f"{backend.base_url}/v1/chat/completions",
             json=upstream_body,
-            headers={
-                "Authorization": f"Bearer {UPSTREAM_KEY}",
-                "Content-Type": "application/json",
-            },
+            headers=backend.headers(),
         )
         if upstream_response.status_code >= 400:
             return JSONResponse(
@@ -301,6 +345,7 @@ async def chat_completions(
             # What was done, not just what was decided. An obligation carried out
             # silently is indistinguishable from one that was skipped.
             "obligations_applied": [*request_notes, *applied.notes],
+            "routed_to": routed_target(list(inbound.obligations)),
             "upstream_ms": upstream_ms,
         }
     )
@@ -324,6 +369,7 @@ def _merge_obligations(*groups: Sequence[dict[str, Any]]) -> list[dict[str, Any]
 async def _stream(
     upstream_body: dict[str, Any],
     *,
+    backend: Backend,
     model: str,
     principal: str,
     principal_type: str,
@@ -381,7 +427,7 @@ async def _stream(
         return
 
     try:
-        async with _upstream_frames(upstream_body, model) as frames:
+        async with _upstream_frames(upstream_body, model, backend) as frames:
             async for frame in govern_stream(frames, governor, on_refusal=refusal_event):
                 yield frame
     except httpx.HTTPError as exc:
@@ -390,7 +436,9 @@ async def _stream(
 
 
 @asynccontextmanager
-async def _upstream_frames(body: dict[str, Any], model: str) -> AsyncIterator[AsyncIterator[bytes]]:
+async def _upstream_frames(
+    body: dict[str, Any], model: str, backend: Backend
+) -> AsyncIterator[AsyncIterator[bytes]]:
     """Raw SSE bytes from wherever the answer comes from.
 
     One shape for both sources, so the governing loop never branches on which
@@ -403,13 +451,9 @@ async def _upstream_frames(body: dict[str, Any], model: str) -> AsyncIterator[As
 
     async with _upstream.stream(
         "POST",
-        "/v1/chat/completions",
+        f"{backend.base_url}/v1/chat/completions",
         json=body,
-        headers={
-            "Authorization": f"Bearer {UPSTREAM_KEY}",
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-        },
+        headers={**backend.headers(), "Accept": "text/event-stream"},
     ) as response:
         response.raise_for_status()
         yield response.aiter_bytes()

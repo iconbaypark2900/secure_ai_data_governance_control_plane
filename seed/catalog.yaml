@@ -62,6 +62,45 @@ assets:
     classifications:
       - {label: confidential.legal, source: manual}
 
+  # Models are ordinary assets. Registering one is the same act as registering
+  # a table, so it inherits labelling, ownership, and audit -- and the router
+  # chooses between them using these attributes.
+  - urn: model://internal/llama-3-70b
+    name: Llama 3 70B (internal)
+    kind: model
+    owner: ml-platform
+    description: Self-hosted, EU data centre. The default for regulated data.
+    attributes:
+      region: eu
+      hosting: on_prem
+      provider: internal
+      aliases: [eu-only-llm, internal-gpt]
+      routing_priority: 10
+
+  - urn: model://azure/gpt-4o-eu
+    name: GPT-4o (Azure, EU)
+    kind: model
+    owner: ml-platform
+    description: Vendor model in an EU-resident VPC under a processing agreement.
+    attributes:
+      region: eu
+      hosting: vpc
+      provider: azure
+      aliases: [eu-only-llm]
+      routing_priority: 20
+
+  - urn: model://openai/gpt-4o
+    name: GPT-4o (public API)
+    kind: model
+    owner: ml-platform
+    description: Third-party SaaS. Fast and cheap; not for regulated data.
+    attributes:
+      region: us
+      hosting: saas
+      provider: openai
+      aliases: [fast-llm]
+      routing_priority: 5
+
 principals:
   - external_id: agent:support_bot
     type: agent

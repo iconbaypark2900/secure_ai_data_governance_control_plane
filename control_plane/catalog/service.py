@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from control_plane.classification import taxonomy
 from control_plane.classification.scanner import ScanResult
 from control_plane.models.catalog import AssetClassification, DataAsset, Principal
+from control_plane.routing.router import MODEL_KIND, ModelCandidate
 
 __all__ = ["SOURCE_PRECEDENCE", "CatalogService", "ResolvedAsset"]
 
@@ -300,6 +301,27 @@ class CatalogService:
         asset.last_scanned_at = datetime.now(UTC)
         await self._session.flush()
         return applied
+
+    async def model_candidates(self) -> list[ModelCandidate]:
+        """Every registered model the router may choose between.
+
+        Models are ordinary catalog assets with ``kind: model``, so registering
+        one is the same act as registering a table, and it inherits labelling,
+        ownership, and audit rather than needing a second registry that drifts.
+        """
+        assets = await self.list_assets(kind=MODEL_KIND, limit=500)
+        candidates: list[ModelCandidate] = []
+        for asset in assets:
+            labels = await self.classifications_for(asset.id)
+            candidates.append(
+                ModelCandidate(
+                    urn=asset.urn,
+                    name=asset.name,
+                    attributes=dict(asset.attributes or {}),
+                    labels=tuple(sorted({row.label for row in labels})),
+                )
+            )
+        return candidates
 
     # --- resolution -------------------------------------------------------- #
 

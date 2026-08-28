@@ -53,6 +53,7 @@ from control_plane.policy.model import (
 from control_plane.policy.store import PolicyStore
 from control_plane.redaction.tokenization import DeterministicTokenizer
 from control_plane.redaction.transforms import RedactionResult, Redactor
+from control_plane.routing.router import ModelRouter, RoutingDecision, RoutingUnsatisfiable
 from control_plane.schemas.decision import (
     ApprovalOut,
     DecideRequest,
@@ -172,8 +173,11 @@ class PolicyDecisionPoint:
             )
 
         decision = self._guard_tokenization(decision)
+        decision, routing = await self._resolve_routing(decision, request)
 
         response = self._build_response(request, decision, findings, all_labels)
+        if routing is not None:
+            response.route = routing.to_dict()
         response.payload_truncated = scan.truncated
         response.approval_error = approval_error
         response.approval_redeemed = approval is not None
@@ -367,6 +371,7 @@ class PolicyDecisionPoint:
                 "redaction_count": len(response.redactions),
                 "payload_digest": digest,
                 "correlation_id": request.correlation_id,
+                "route_target": response.route.get("target") if response.route else None,
                 "latency_ms": latency_ms,
             },
         )
@@ -418,6 +423,62 @@ class PolicyDecisionPoint:
                 "tokenization is required by policy but CP_TOKENIZATION_KEY is not set",
             ),
         )
+
+    async def _resolve_routing(
+        self, decision: Decision, request: DecideRequest
+    ) -> tuple[Decision, RoutingDecision | None]:
+        """Work out where a permitted request may go.
+
+        Resolution happens here, not at the enforcement point, because which
+        model saw the data is a governance fact and belongs in the decision
+        record -- it is the first thing asked after an incident. How to reach
+        that model is deployment configuration the enforcement point holds.
+        """
+        if decision.effect is Effect.DENY:
+            return decision, None
+        obligations = [o.to_dict() for o in decision.obligations]
+        if not any(o.get("type") == "route" for o in obligations):
+            return decision, None
+
+        router = ModelRouter(await self._catalog.model_candidates())
+        try:
+            routing = router.resolve(obligations, original=request.resource.urn)
+        except RoutingUnsatisfiable as exc:
+            routing = RoutingDecision(original=request.resource.urn, reason=str(exc))
+
+        if routing is None:
+            return decision, None
+
+        if not routing.satisfied:
+            # A policy said the request may go only to somewhere that does not
+            # exist. Sending it to the originally requested model would invert
+            # the policy exactly.
+            log.error(
+                "routing_unsatisfiable",
+                determining_policy=decision.determining_policy,
+                reason=routing.reason,
+                original=request.resource.urn,
+            )
+            return (
+                replace(
+                    decision,
+                    effect=Effect.DENY,
+                    obligations=(),
+                    reason=f"{decision.reason}; denied because {routing.reason}",
+                    errors=(*decision.errors, routing.reason),
+                ),
+                routing,
+            )
+
+        # Hand the enforcement point a concrete answer rather than the
+        # constraints it would otherwise have to re-derive.
+        resolved = tuple(
+            Obligation.model_validate({**o, "resolved": routing.target})
+            if o.get("type") == "route"
+            else Obligation.model_validate(o)
+            for o in obligations
+        )
+        return replace(decision, obligations=resolved), routing
 
     # --- approvals ----------------------------------------------------------- #
 

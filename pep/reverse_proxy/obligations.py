@@ -11,6 +11,11 @@ they act on the transport rather than on the data:
                      choices on the way back.
 ``watermark``        marks the delivered content, so its origin survives being
                      pasted somewhere else.
+``route``            sends the request to the model the control plane chose,
+                     rather than the one the caller addressed. The control plane
+                     decides *which*; this knows *how to reach it*, because
+                     endpoints and credentials are deployment configuration and
+                     have no business in a policy database.
 
 Pure functions over plain dictionaries, so they can be tested without an HTTP
 server or a live control plane. Each returns what it did, because an obligation
@@ -19,6 +24,7 @@ carried out silently is indistinguishable from one skipped.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -26,16 +32,19 @@ from typing import Any
 __all__ = [
     "SATISFIABLE",
     "AppliedObligations",
+    "Backend",
     "apply_request_obligations",
     "apply_response_obligations",
     "check_purpose",
+    "load_backends",
     "obligations_of",
+    "routed_target",
     "token_cap",
 ]
 
 #: What this enforcement point tells the SDK it can discharge. Anything else in a
 #: decision turns the allow into a refusal rather than being quietly ignored.
-SATISFIABLE: frozenset[str] = frozenset({"limit", "watermark", "require_purpose"})
+SATISFIABLE: frozenset[str] = frozenset({"limit", "watermark", "require_purpose", "route"})
 
 
 @dataclass
@@ -63,6 +72,57 @@ class AppliedObligations:
 def obligations_of(obligations: Iterable[Mapping[str, Any]], kind: str) -> list[Mapping[str, Any]]:
     """Every obligation of one type."""
     return [o for o in obligations if str(o.get("type", "")).lower() == kind]
+
+
+@dataclass(frozen=True, slots=True)
+class Backend:
+    """How to reach one model."""
+
+    base_url: str
+    model: str = ""
+    api_key: str = ""
+
+    def headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+
+def load_backends(raw: str) -> dict[str, Backend]:
+    """Parse the model URN to endpoint map this proxy was configured with.
+
+    Keyed by the URN the control plane resolves to, so the two sides agree on
+    identity without the control plane ever holding a credential.
+    """
+    if not raw.strip():
+        return {}
+    try:
+        document = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"PEP_MODEL_BACKENDS is not valid JSON: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ValueError("PEP_MODEL_BACKENDS must be an object keyed by model URN")
+
+    backends: dict[str, Backend] = {}
+    for urn, config in document.items():
+        if not isinstance(config, dict) or not config.get("base_url"):
+            raise ValueError(f"backend {urn!r} needs a 'base_url'")
+        backends[str(urn)] = Backend(
+            base_url=str(config["base_url"]).rstrip("/"),
+            model=str(config.get("model", "")),
+            api_key=str(config.get("api_key", "")),
+        )
+    return backends
+
+
+def routed_target(obligations: Iterable[Mapping[str, Any]]) -> str | None:
+    """The model URN the control plane resolved to, if it routed at all."""
+    for obligation in obligations_of(obligations, "route"):
+        resolved = obligation.get("resolved")
+        if resolved:
+            return str(resolved)
+    return None
 
 
 def check_purpose(obligations: Iterable[Mapping[str, Any]], declared: str) -> str | None:

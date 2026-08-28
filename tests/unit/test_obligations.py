@@ -41,9 +41,20 @@ class TestTheSupportedSet:
 
         assert KNOWN_OBLIGATIONS - CONTROL_PLANE_OBLIGATIONS == SATISFIABLE
 
-    @pytest.mark.parametrize("removed", ["notify", "route"])
+    @pytest.mark.parametrize("removed", ["notify"])
     def test_types_nothing_implements_were_removed(self, removed: str) -> None:
         assert removed not in KNOWN_OBLIGATIONS
+
+    def test_route_came_back_only_once_something_implemented_it(self) -> None:
+        """The rule working in both directions.
+
+        `route` was removed alongside `notify` because nothing honoured it. It is
+        declared again now, and the test above -- which compares the
+        enforcement-point set against what the reference proxy says it can
+        satisfy -- is what keeps that honest.
+        """
+        assert "route" in KNOWN_OBLIGATIONS
+        assert "route" not in CONTROL_PLANE_OBLIGATIONS
 
 
 class TestValidation:
@@ -70,6 +81,9 @@ class TestValidation:
             ({"type": "ttl"}, "at least one of"),
             ({"type": "ttl", "seconds": 0}, "positive integer"),
             ({"type": "ttl", "seconds": "an hour"}, "positive integer"),
+            ({"type": "route"}, "at least one of"),
+            ({"type": "route", "require": "eu"}, "must be an object"),
+            ({"type": "route", "to": ["a", "b"]}, "logical model name"),
         ],
     )
     def test_malformed_obligations_are_rejected(self, document, message) -> None:
@@ -85,6 +99,8 @@ class TestValidation:
             {"type": "watermark", "text": "internal use only"},
             {"type": "require_purpose", "purposes": ["support"]},
             {"type": "ttl", "seconds": 3600},
+            {"type": "route", "to": "eu-only-llm"},
+            {"type": "route", "require": {"region": "eu"}},
             {"type": "log", "level": "notice"},
             {"type": "annotate", "note": "reviewed"},
         ],
@@ -118,5 +134,4 @@ class TestExecutorRouting:
     def test_the_schema_advertises_only_what_exists(self) -> None:
         """GET /v1/policies/schema serves this set, so it must not overpromise."""
         assert "notify" not in KNOWN_OBLIGATIONS
-        assert "route" not in KNOWN_OBLIGATIONS
         assert set(OBLIGATION_SPECS) == KNOWN_OBLIGATIONS

@@ -130,6 +130,14 @@ OBLIGATION_SPECS: dict[str, ObligationSpec] = {
         "Mark the delivered content so its origin survives a copy-paste.",
         requires_any=("text",),
     ),
+    "route": ObligationSpec(
+        Executor.ENFORCEMENT_POINT,
+        "Send the request to a model satisfying these constraints. Names a "
+        "logical target with 'to', or constrains attributes with 'require', or "
+        "both. The control plane resolves it against the registered models and "
+        "returns a concrete URN; the enforcement point knows how to reach it.",
+        requires_any=("to", "require"),
+    ),
     "require_purpose": ObligationSpec(
         Executor.ENFORCEMENT_POINT,
         "The enforcement point must confirm its declared purpose is one of "
@@ -199,6 +207,15 @@ class Obligation(BaseModel):
             seconds = extras.get("seconds")
             if not isinstance(seconds, int) or isinstance(seconds, bool) or seconds <= 0:
                 raise ValueError("'ttl' needs 'seconds' as a positive integer")
+        elif self.type == "route":
+            requirements = extras.get("require")
+            if requirements is not None and not isinstance(requirements, dict):
+                raise ValueError(
+                    "'route.require' must be an object of attribute -> allowed value(s)"
+                )
+            target = extras.get("to")
+            if target is not None and not isinstance(target, str):
+                raise ValueError("'route.to' must be a logical model name")
         elif self.type == "limit":
             for key in ("max_rows", "max_bytes", "max_tokens", "max_results"):
                 value = extras.get(key)

@@ -122,7 +122,7 @@ two is what a redaction obligation is for.
 
 ---
 
-## The seven things it does
+## The eight things it does
 
 ### 1. Knows what the data is
 
@@ -237,7 +237,42 @@ deployment with no key configured produces a deny, not a quietly substituted
 hash. That was a real bug — the strategy silently behaved as `hash`, and nobody
 would have found out until they needed to reverse one.
 
-### 5. Attaches duties that actually bind
+### 5. Sends the request somewhere it is allowed to go
+
+Refusing is the easy half. A policy can also say *where* data may be processed,
+and the control plane resolves it:
+
+```yaml
+- key: route-regulated-data-to-eu-models
+  effect: allow
+  match:
+    all:
+      - action: {in: [infer, embed, return]}
+      - classifications: {any_of: [phi, pci, pii.ssn]}
+  obligations:
+    - {type: route, require: {region: eu}}
+```
+
+```
+agent asks for  model://openai/gpt-4o        (region: us)
+policy says     region must be eu
+control plane   → model://internal/llama-3-70b
+                  "routed because it satisfies region='eu'"
+                  rejected: model://openai/gpt-4o — region is 'us'
+```
+
+Models are **ordinary catalog assets** under a `model://` URN, so registering one
+is the same act as registering a table and it inherits labelling, ownership, and
+audit. Constraining by attribute rather than naming a model means adding an EU
+model later needs no policy change — and losing the last one is a **denial, not a
+silent fallback** to the model the policy steered away from.
+
+The control plane picks *which*; the enforcement point knows *how to reach it*,
+because endpoints and credentials are deployment configuration and have no place
+in a policy database. Which model saw the data lands in the decision record,
+since that is the first question anyone asks afterwards.
+
+### 6. Attaches duties that actually bind
 
 An obligation is not advice. Seven types, and every one of them is implemented by
 something:
@@ -248,10 +283,11 @@ something:
 | `annotate` `log` `ttl` | control plane | record, raise the log level, bound retention |
 | `limit` | enforcement point | cap tokens in, bytes and results back |
 | `watermark` | enforcement point | mark delivered content so its origin survives a paste |
+| `route` | enforcement point | send the request to a model the policy permits |
 | `require_purpose` | enforcement point | re-check the declared purpose at the point of use |
 
-The list used to be nine. `notify` and `route` were removed because nothing
-implemented them — a policy author who read the schema and wrote one got a
+The list was briefly cut to six: `notify` and `route` were removed because nothing
+implemented them, and `route` came back only once something did — a policy author who read the schema and wrote one got a
 well-formed policy that denied their own traffic. An unknown type is now a 422
 when you write the policy, not a surprise at 3am.
 
@@ -259,7 +295,7 @@ The SDK enforces the binding: `decision.enforce()` raises unless the caller has
 declared it can discharge whatever came back, so "allow, but watermark it" can
 never quietly become "allow".
 
-### 6. Can require a person
+### 7. Can require a person
 
 Some things should be neither blocked nor waved through. `require_approval`
 parks the decision, and a human grants it in the console or over the API:
@@ -280,7 +316,7 @@ approval survives unspent for when that prohibition is lifted.
 Without those four properties, "approve this one export" quietly becomes
 "approve anything, for anyone holding the id".
 
-### 7. Proves it afterwards
+### 8. Proves it afterwards
 
 Every decision and every policy change is sealed into a hash chain. Each record's
 digest is an **HMAC** over its own content *and* its predecessor's digest.
@@ -509,6 +545,7 @@ control_plane/
   redaction/        the six strategies, and vault-free reversible tokenisation
   audit/            the hash chain and its storage
   catalog/          assets, principals, pattern resolution, and discovery
+  routing/          choosing which model a permitted request may reach
   adapters/         Postgres, Qdrant, MCP, LibreChat
   api/v1/           40 HTTP operations, plus /metrics
   pdp.py            the pipeline that ties it together
@@ -518,7 +555,7 @@ pep/reverse_proxy/  the reference enforcement point
 ui/                 the admin console (React + TypeScript)
 seed/               the reference policy set and catalog
 migrations/         Alembic, including the append-only trigger
-tests/              502 tests
+tests/              550 tests
 docs/               architecture, the policy language, and the decision records
 ```
 
@@ -575,7 +612,7 @@ string of each denial.
 ## Testing
 
 ```bash
-make test      # 481 tests on SQLite, no external dependencies
+make test      # 517 tests on SQLite, no external dependencies
 make test-pg   # + 7 that need real Postgres
 make check     # ruff, mypy, and the suite — everything CI runs
 ```
@@ -610,6 +647,11 @@ things is worse than none, because people copy it.
 - [`docs/architecture.md`](docs/architecture.md) — the components and the request path
 - [`docs/policy-language.md`](docs/policy-language.md) — the full policy reference
 - [`docs/adr/`](docs/adr/) — why the load-bearing decisions went the way they did
+
+## Security
+
+Reporting, what is in scope, and the weaknesses that are known and accepted
+rather than hidden: [`SECURITY.md`](SECURITY.md).
 
 ## Licence
 

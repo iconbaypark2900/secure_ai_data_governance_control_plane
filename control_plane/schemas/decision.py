@@ -180,6 +180,12 @@ class DecideResponse(BaseModel):
         "The enforcement point must satisfy these or treat the decision as a deny.",
     )
 
+    route: dict[str, Any] | None = Field(
+        default=None,
+        description="Where this request may go, when a policy constrained it. "
+        "Carries the resolved model URN, what was asked for, whether that is a "
+        "redirect, and which candidates were rejected and why.",
+    )
     approval: ApprovalOut | None = None
     approval_redeemed: bool = Field(
         default=False,

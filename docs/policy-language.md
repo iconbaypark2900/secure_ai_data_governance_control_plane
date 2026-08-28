@@ -286,12 +286,38 @@ that buys and what it costs.
 | `limit` | one of `max_rows`, `max_bytes`, `max_tokens`, `max_results` | enforcement point |
 | `watermark` | `text` | enforcement point |
 | `require_purpose` | `purposes` | enforcement point |
+| `route` | `to` and/or `require` | enforcement point |
 
 That is the whole list, and an unknown type is a **422 when you write the
-policy** rather than a surprise at decision time. `notify` and `route` used to be
-here and were removed: nothing implemented them, so writing one produced a
-well-formed policy that denied your own traffic. See
+policy** rather than a surprise at decision time. `notify` and `route` were both
+removed at one point because nothing implemented them — writing one produced a
+well-formed policy that denied your own traffic. `route` came back only once
+something honoured it; `notify` has not. See
 [ADR 0010](adr/0010-declare-only-what-is-implemented.md).
+
+### `route`
+
+Where a permitted request may be processed. Constrain by attribute, or name a
+logical target, or both:
+
+```yaml
+obligations:
+  - {type: route, require: {region: eu, hosting: [on_prem, vpc]}}
+  - {type: route, to: eu-only-llm}
+```
+
+The control plane resolves this against models registered in the catalog —
+ordinary assets with `kind: model` whose attributes say where they run — and
+returns the chosen URN in the obligation's `resolved` field.
+
+Prefer `require` over `to`: adding a qualifying model later then needs no policy
+change, and losing the last one **denies** rather than silently falling back to
+the model the policy steered away from. Requirements from several policies
+intersect, so two rules each narrowing where data may go both hold.
+
+Scope routing rules to model calls (`action: {in: [infer, embed, return]}`).
+A routing rule that forgets to quietly intercepts every ordinary read of the same
+data — which the first draft of the shipped policy did, and a test now prevents.
 
 Anything in the second group appears in the response's
 `unsupported_obligations`. The enforcement point must satisfy it or deny —
