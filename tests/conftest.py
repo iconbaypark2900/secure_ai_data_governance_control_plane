@@ -21,9 +21,25 @@ os.environ.setdefault("CP_AUDIT_HMAC_KEY", "test-audit-key")
 os.environ.setdefault("CP_REDACTION_HMAC_KEY", "test-redaction-key")
 
 from control_plane import db as db_module
-from control_plane.config import get_settings, reset_settings_cache
+from control_plane.config import Settings, get_settings, reset_settings_cache
 from control_plane.models import Base
 from control_plane.policy.store import invalidate_engine_cache
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _ignore_developer_dotenv() -> None:
+    """Stop the suite reading whatever .env happens to be lying around.
+
+    Settings load ``.env`` by default, so after ``make secrets`` a contributor's
+    file supplies a tokenization key, a Postgres URL, and whatever else -- and
+    tests asserting "this is not configured" start failing on a correctly set up
+    machine. That is a test reading the developer's environment rather than the
+    thing it means to test.
+
+    Tests that need a setting set it explicitly. Nothing here should depend on a
+    file that is not in the repository.
+    """
+    Settings.model_config["env_file"] = None
 
 
 @pytest.fixture(autouse=True)
