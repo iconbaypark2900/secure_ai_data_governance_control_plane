@@ -6,13 +6,24 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
+import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from control_plane.auth.keys import IssuedKey, generate_key, is_expired, split_key, verify_key
+from control_plane.auth.keys import (
+    IssuedKey,
+    generate_key,
+    hash_key,
+    is_expired,
+    needs_rehash,
+    split_key,
+    verify_key,
+)
 from control_plane.models.auth import ApiKey
 
 __all__ = ["ApiKeyService", "AuthenticatedKey"]
+
+log = structlog.get_logger(__name__)
 
 
 class AuthenticatedKey:
@@ -103,6 +114,13 @@ class ApiKeyService:
             return None
         if not verify_key(presented, record.key_hash):
             return None
+
+        if needs_rehash(record.key_hash):
+            # Upgrade in place on first successful use, so a deployment that
+            # predates the scheme change stops paying the old cost without
+            # anyone reissuing a key or noticing a migration happened.
+            record.key_hash = hash_key(presented)
+            log.info("api_key_rehashed", prefix=record.prefix)
 
         record.last_used_at = datetime.now(UTC)
         return AuthenticatedKey(record)

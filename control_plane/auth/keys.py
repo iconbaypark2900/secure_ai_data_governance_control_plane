@@ -2,17 +2,30 @@
 
 A key looks like ``cpk_3f8a91c2_<32 random chars>``. The middle segment is a
 non-secret prefix stored in the clear and indexed, so authenticating a request
-is one row lookup rather than an Argon2 verification against every key in the
-table. The trailing secret is never stored -- only its Argon2id hash.
+is one row lookup rather than a hash comparison against every key in the table.
+The trailing secret is never stored -- only a keyed digest of it.
 
-Argon2id rather than SHA-256: API keys are high-entropy, so a fast hash would be
-defensible, but keys get pasted into ``.env`` files and reused, and the cost of
-being wrong about that is unbounded. The verification cost is paid once per
-request and is small next to a policy evaluation.
+**On the choice of hash.** This used to be Argon2id, on the reasoning that keys
+get pasted into ``.env`` files and a slow hash is the conservative choice. That
+reasoning was wrong, and measurably so: Argon2id at these parameters costs about
+82 ms, which is roughly fourteen times what classifying an 8 KB payload costs and
+which dominated every authenticated request.
+
+A slow hash exists to make *guessing* expensive, and guessing is only a threat
+when the secret might be guessable. These secrets are not: ``token_urlsafe(24)``
+is 192 bits from the OS entropy pool, so an attacker who has the stored digest
+and infinite time still cannot brute-force it, whatever the hash costs. Paying
+82 ms per request to defend against an attack the key length already prevents is
+not conservatism, it is a throughput ceiling bought for nothing.
+
+So: HMAC-SHA256 under a server-side pepper, compared in constant time. Argon2id
+digests already in the database still verify, and are transparently re-hashed on
+first use, so no key has to be reissued.
 """
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import secrets
 from dataclasses import dataclass
@@ -38,9 +51,28 @@ KEY_PREFIX = "cpk"
 _PREFIX_BYTES = 4
 _SECRET_BYTES = 24
 
-# Tuned for an interactive request path: strong enough to matter, fast enough
-# that authentication is not the slowest part of a decision.
-_hasher = PasswordHasher(time_cost=2, memory_cost=64 * 1024, parallelism=2, hash_len=32)
+#: Digests produced by the current scheme carry this marker, so a stored digest
+#: is self-describing and the legacy path can be recognised without a schema
+#: column recording which algorithm made it.
+HMAC_SCHEME = "hmac-sha256"
+
+#: Retained only to verify -- and then replace -- digests written by the previous
+#: scheme. Nothing new is hashed with it.
+_legacy_hasher = PasswordHasher(time_cost=2, memory_cost=64 * 1024, parallelism=2, hash_len=32)
+
+
+def _pepper() -> bytes:
+    """The server-side key mixed into every digest.
+
+    Optional, and the system is secure without it: 192 bits of secret means the
+    digest is not brute-forceable regardless. Setting one adds a second thing an
+    attacker needs -- a database dump alone stops being enough to check guesses
+    offline -- for no runtime cost.
+    """
+    from control_plane.config import get_settings
+
+    configured = get_settings().api_key_pepper.get_secret_value()
+    return configured.encode("utf-8") if configured else b"control-plane/api-key/v1"
 
 
 class Scope:
@@ -105,15 +137,30 @@ def generate_key() -> IssuedKey:
 
 
 def hash_key(plaintext: str) -> str:
-    return _hasher.hash(plaintext)
+    """The storable digest of a key."""
+    digest = hmac.new(_pepper(), plaintext.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{HMAC_SCHEME}${digest}"
 
 
 def verify_key(plaintext: str, key_hash: str) -> bool:
-    """Check a presented key against a stored hash, without leaking why it failed."""
+    """Check a presented key against a stored digest, in constant time.
+
+    Accepts both schemes. Whether a digest matches must not be inferable from how
+    long the check took, which is why the comparison is ``compare_digest`` rather
+    than ``==``.
+    """
+    if key_hash.startswith(f"{HMAC_SCHEME}$"):
+        expected = hmac.new(_pepper(), plaintext.encode("utf-8"), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(key_hash.split("$", 1)[1], expected)
     try:
-        return _hasher.verify(key_hash, plaintext)
+        return _legacy_hasher.verify(key_hash, plaintext)
     except (VerifyMismatchError, VerificationError, InvalidHashError):
         return False
+
+
+def needs_rehash(key_hash: str) -> bool:
+    """Whether a stored digest was written by the superseded scheme."""
+    return not key_hash.startswith(f"{HMAC_SCHEME}$")
 
 
 def split_key(plaintext: str) -> tuple[str, str] | None:

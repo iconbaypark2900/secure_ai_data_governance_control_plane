@@ -193,3 +193,47 @@ class TestKeyLifecycle:
         issued = [e for e in events["items"] if e["event"] == "apikey.issued"]
         assert issued and issued[0]["payload"]["name"] == "audited"
         assert not any("cpk_" in str(e["payload"]) for e in events["items"])
+
+
+class TestDigestUpgrade:
+    async def test_a_legacy_digest_is_replaced_on_first_use(self, authed_client) -> None:
+        """Verify, then upgrade, so nobody reissues a key over a scheme change."""
+        from argon2 import PasswordHasher
+        from sqlalchemy import select
+
+        from control_plane.auth.keys import HMAC_SCHEME, generate_key
+        from control_plane.models.auth import ApiKey
+
+        client, _admin, _issue = authed_client
+        issued = generate_key()
+
+        # Plant a key hashed the old way, as an upgrade would find it.
+        from control_plane.db import get_sessionmaker
+
+        factory = get_sessionmaker()
+        async with factory() as session:
+            session.add(
+                ApiKey(
+                    name="legacy",
+                    prefix=issued.prefix,
+                    key_hash=PasswordHasher(
+                        time_cost=2, memory_cost=64 * 1024, parallelism=2, hash_len=32
+                    ).hash(issued.plaintext),
+                    scopes=["policy:read"],
+                )
+            )
+            await session.commit()
+
+        assert (
+            await client.get("/v1/policies", headers={"X-API-Key": issued.plaintext})
+        ).status_code == 200
+
+        async with factory() as session:
+            stored = (
+                await session.execute(select(ApiKey).where(ApiKey.prefix == issued.prefix))
+            ).scalar_one()
+            assert stored.key_hash.startswith(f"{HMAC_SCHEME}$")
+
+        assert (
+            await client.get("/v1/policies", headers={"X-API-Key": issued.plaintext})
+        ).status_code == 200

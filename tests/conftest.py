@@ -104,6 +104,11 @@ async def client(engine, monkeypatch) -> AsyncIterator:
     reset_settings_cache()
 
     factory = async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
+    # Point the module-level factory at the test engine too. Overriding get_db
+    # covers code that takes the request's session; this covers code that opens
+    # its own, which would otherwise quietly build a second, empty database.
+    monkeypatch.setattr(db_module, "_engine", engine)
+    monkeypatch.setattr(db_module, "_sessionmaker", factory)
 
     async def override_db() -> AsyncIterator[AsyncSession]:
         async with factory() as session:
@@ -141,6 +146,8 @@ async def authed_client(engine, monkeypatch) -> AsyncIterator[tuple]:
     reset_settings_cache()
 
     factory = async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
+    monkeypatch.setattr(db_module, "_engine", engine)
+    monkeypatch.setattr(db_module, "_sessionmaker", factory)
 
     async def override_db() -> AsyncIterator[AsyncSession]:
         async with factory() as session:

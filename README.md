@@ -313,18 +313,41 @@ whom, about what. Payload content appears only as a keyed digest, which answers
 
 ### Cost
 
-Measured against the reference policy set over HTTP, on Postgres, with a payload
-carrying three identifiers:
+Measured end to end over HTTP against Postgres, 8 KB payloads — the shape a
+retrieval pipeline actually sends — at concurrency 16:
 
-| | median | p-max over 15 calls |
-|---|---|---|
-| Evaluate — catalog lookup, classify, decide, redact | 6.6 ms | 12.3 ms |
-| End to end, including persisting the decision and sealing its audit record | 10.4 ms | 36.7 ms |
+| | throughput | p50 | p95 |
+|---|---|---|---|
+| one worker | 50 req/sec | 216 ms | 843 ms |
+| four workers | 107 req/sec | 106 ms | 368 ms |
 
-Numbers from a laptop, not a benchmark rig; take them as an order of magnitude.
-Two things keep the hot path short: the compiled policy set is cached in-process
-and invalidated on write, and the SDK caches payload-free decisions — the pure
-authorisation question — for a few seconds.
+A single small decision is ~10 ms end to end, including persisting it and sealing
+its audit record.
+
+**Where the time goes, and one thing that was wrong.** Authentication used to
+dominate: API keys were stored as Argon2id digests costing 82 ms to verify —
+fourteen times what classifying the payload cost — on every request. The source
+comment asserting that cost was "small next to a policy evaluation" was written
+from plausibility, and stood until something measured it. Keys carry 192 bits of
+entropy, so a slow hash was defending against an attack the key length already
+prevents; they now use a keyed HMAC, and throughput went up roughly 5×
+([ADR 0011](docs/adr/0011-api-keys-use-a-fast-keyed-hash.md)).
+
+What remains is classification, which is real CPU: about 0.6 ms per KB, and regex
+only partially releases the GIL, so **one worker is one core**. `WEB_CONCURRENCY`
+is the knob that raises throughput; threads are not (measured at 1.25×, and the
+offload is kept for tail latency, not throughput). `CP_MAX_SCAN_CHARS` bounds the
+worst case at 64 KiB — a payload past it is scanned to the limit and the decision
+is marked `payload_truncated`, which a policy can refuse on:
+
+```yaml
+- key: deny-unscannable-payloads
+  effect: deny
+  match: {env.payload_truncated: true}
+```
+
+Numbers from a 32-core workstation, not a benchmark rig; take them as an order of
+magnitude and measure your own shapes.
 
 ---
 
@@ -386,6 +409,24 @@ Both directions are governed. A model given clean input can still emit a
 memorised training example, a credential a tool handed it, or a row it inferred
 from context — governing only the inbound half protects the provider, not the
 user.
+
+**Streaming works.** `stream: true` is governed behind a hold-back window: text
+reaches the client only once it is far enough behind the write head that nothing
+still arriving could turn out to be part of it.
+
+```
+produced:  ...the key is sk-ant-api03-AbCd
+                         └──────────────┘  held back
+emitted:   ...the key is
+```
+
+So tokens flow, and a credential the model emits mid-answer is refused *before*
+any of it goes out — verified: five frames delivered, the credential appears zero
+times, and the client gets a readable error rather than a truncated answer. The
+cost is latency, not correctness; the residual risk is a value longer than the
+window, which stops the stream with an explicit message rather than corrupting
+it. `PEP_STREAM_MODE=buffer` trades incremental delivery for no blind spot at
+all.
 
 ### Filling the catalog
 
@@ -477,7 +518,7 @@ pep/reverse_proxy/  the reference enforcement point
 ui/                 the admin console (React + TypeScript)
 seed/               the reference policy set and catalog
 migrations/         Alembic, including the append-only trigger
-tests/              464 tests
+tests/              502 tests
 docs/               architecture, the policy language, and the decision records
 ```
 
@@ -534,7 +575,7 @@ string of each denial.
 ## Testing
 
 ```bash
-make test      # 443 tests on SQLite, no external dependencies
+make test      # 481 tests on SQLite, no external dependencies
 make test-pg   # + 7 that need real Postgres
 make check     # ruff, mypy, and the suite — everything CI runs
 ```

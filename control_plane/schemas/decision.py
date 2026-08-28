@@ -157,6 +157,12 @@ class DecideResponse(BaseModel):
         "anything found in the payload.",
     )
     findings: list[FindingOut] = Field(default_factory=list)
+    payload_truncated: bool = Field(
+        default=False,
+        description="The payload exceeded the scan ceiling, so only its first "
+        "CP_MAX_SCAN_CHARS characters were classified. An empty findings list "
+        "then means 'nothing in the part we read', not 'nothing there'.",
+    )
     regulations: list[str] = Field(
         default_factory=list,
         description="Regulatory regimes implicated by the labels in play.",
@@ -211,6 +217,12 @@ class ClassifyResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     findings: list[FindingOut] = Field(default_factory=list)
+    payload_truncated: bool = Field(
+        default=False,
+        description="The payload exceeded the scan ceiling, so only its first "
+        "CP_MAX_SCAN_CHARS characters were classified. An empty findings list "
+        "then means 'nothing in the part we read', not 'nothing there'.",
+    )
     labels: list[str] = Field(default_factory=list)
     label_counts: dict[str, int] = Field(default_factory=dict)
     max_severity: str | None = None

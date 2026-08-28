@@ -443,6 +443,17 @@ class AccessRequest(BaseModel):
     #: Labels discovered by scanning the payload in this request, merged with the
     #: resource's catalog labels before evaluation.
     findings: list[str] = Field(default_factory=list)
+    #: Facts about the evaluation itself rather than about the request. Chiefly
+    #: ``payload_truncated``: when a payload exceeds the scan ceiling only its
+    #: first CP_MAX_SCAN_CHARS characters were classified, so an empty
+    #: ``findings`` means "nothing found in the part we read", not "nothing
+    #: there". A policy that cares can refuse to guess::
+    #:
+    #:     - key: deny-unscannable-payloads
+    #:       effect: deny
+    #:       match:
+    #:         env.payload_truncated: true
+    env: dict[str, Any] = Field(default_factory=dict)
 
     def selector_root(self) -> dict[str, Any]:
         """The object dotted selectors are resolved against.
@@ -486,5 +497,5 @@ class AccessRequest(BaseModel):
             "context": self.context,
             "findings": payload_labels,
             "classifications": sorted(set(resource_labels) | set(payload_labels)),
-            "env": {},
+            "env": dict(self.env),
         }

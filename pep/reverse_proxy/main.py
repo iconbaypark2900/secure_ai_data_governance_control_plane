@@ -23,6 +23,7 @@ self-contained demo that needs no API key.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import time
@@ -34,7 +35,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "sdk" / "python"))
 
@@ -50,6 +51,15 @@ from pep.reverse_proxy.obligations import (
     apply_response_obligations,
     check_purpose,
 )
+from pep.reverse_proxy.streaming import (
+    DEFAULT_GOVERN_EVERY,
+    DEFAULT_WINDOW_CHARS,
+    DONE,
+    StreamGovernor,
+    govern_stream,
+    rebuild_delta,
+    sse,
+)
 
 CONTROL_PLANE_URL = os.getenv("PEP_CONTROL_PLANE_URL", "http://localhost:8000")
 CONTROL_PLANE_KEY = os.getenv("PEP_CONTROL_PLANE_KEY", "")
@@ -62,6 +72,17 @@ UPSTREAM_MODE = os.getenv("PEP_UPSTREAM_MODE", "echo").lower()
 #: distinguish "our GPU" from "someone else's".
 DESTINATION = os.getenv("PEP_DESTINATION", "external")
 DEFAULT_PRINCIPAL = os.getenv("PEP_DEFAULT_PRINCIPAL", "service:llm_gateway")
+
+#: How a streamed response is governed.
+#:   "window"  emit tokens a fixed distance behind production, so nothing goes out
+#:             until everything it could be part of has been seen. Streams, with a
+#:             blind spot for values longer than the window.
+#:   "buffer"  collect the whole answer, govern it, then emit. No blind spot, and
+#:             no incremental delivery -- time-to-first-token becomes
+#:             time-to-last-token.
+STREAM_MODE = os.getenv("PEP_STREAM_MODE", "window").lower()
+STREAM_WINDOW_CHARS = int(os.getenv("PEP_STREAM_WINDOW_CHARS", DEFAULT_WINDOW_CHARS))
+STREAM_GOVERN_EVERY = int(os.getenv("PEP_STREAM_GOVERN_EVERY", DEFAULT_GOVERN_EVERY))
 
 _control_plane: AsyncControlPlaneClient | None = None
 _upstream: httpx.AsyncClient | None = None
@@ -207,6 +228,21 @@ async def chat_completions(
         upstream_body, list(inbound.obligations)
     )
 
+    if bool(body.get("stream")):
+        return StreamingResponse(
+            _stream(
+                upstream_body,
+                model=model,
+                principal=principal,
+                principal_type=x_principal_type or "service",
+                context=context,
+                correlation_id=correlation_id,
+                inbound_obligations=list(inbound.obligations),
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
+
     # --- call the model ---------------------------------------------------- #
     started = time.perf_counter()
     if UPSTREAM_MODE == "echo":
@@ -283,6 +319,150 @@ def _merge_obligations(*groups: Sequence[dict[str, Any]]) -> list[dict[str, Any]
             seen.add(fingerprint)
             merged.append(dict(obligation))
     return merged
+
+
+async def _stream(
+    upstream_body: dict[str, Any],
+    *,
+    model: str,
+    principal: str,
+    principal_type: str,
+    context: dict[str, Any],
+    correlation_id: str,
+    inbound_obligations: list[dict[str, Any]],
+) -> AsyncIterator[bytes]:
+    """Govern a streamed completion on its way back.
+
+    The outbound decision is asked repeatedly, over a growing prefix of the
+    answer, because a value is only recognisable once all of it has arrived. The
+    governor decides what that makes safe to release.
+    """
+    assert _control_plane is not None and _upstream is not None
+
+    async def govern(span: str) -> tuple[str, str | None]:
+        decision = await _control_plane.decide(
+            principal_id=principal,
+            principal_type=principal_type,
+            action="return",
+            resource_urn=f"model://{model}",
+            resource_kind="model",
+            context={**context, "direction": "outbound", "channel": "stream"},
+            payload=span,
+            correlation_id=correlation_id,
+        )
+        if not decision.allowed:
+            return span, decision.reason
+        try:
+            governed = decision.enforce(can_satisfy=SATISFIABLE)
+        except ObligationUnsatisfied as exc:
+            return span, str(exc)
+        return (governed if isinstance(governed, str) else span), None
+
+    governor = StreamGovernor(
+        govern,
+        window_chars=STREAM_WINDOW_CHARS,
+        govern_every=STREAM_GOVERN_EVERY,
+    )
+
+    def refusal_event(reason: str) -> dict[str, Any]:
+        # An error the client can actually see. Ending the stream silently would
+        # look like a truncated answer rather than a refusal.
+        return {
+            "error": {
+                "message": f"Blocked by data governance policy on the outbound path: {reason}",
+                "type": "data_governance_denied",
+                "code": "policy_denied",
+            }
+        }
+
+    if STREAM_MODE == "buffer":
+        async for frame in _stream_buffered(upstream_body, governor, refusal_event):
+            yield frame
+        return
+
+    try:
+        async with _upstream_frames(upstream_body, model) as frames:
+            async for frame in govern_stream(frames, governor, on_refusal=refusal_event):
+                yield frame
+    except httpx.HTTPError as exc:
+        yield sse(refusal_event(f"the model provider could not be reached: {exc}"))
+        yield sse(DONE)
+
+
+@asynccontextmanager
+async def _upstream_frames(body: dict[str, Any], model: str) -> AsyncIterator[AsyncIterator[bytes]]:
+    """Raw SSE bytes from wherever the answer comes from.
+
+    One shape for both sources, so the governing loop never branches on which
+    upstream it is talking to.
+    """
+    if UPSTREAM_MODE == "echo":
+        async with _echo_stream(body, model) as frames:
+            yield frames
+        return
+
+    async with _upstream.stream(
+        "POST",
+        "/v1/chat/completions",
+        json=body,
+        headers={
+            "Authorization": f"Bearer {UPSTREAM_KEY}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        },
+    ) as response:
+        response.raise_for_status()
+        yield response.aiter_bytes()
+
+
+async def _stream_buffered(
+    upstream_body: dict[str, Any],
+    governor: StreamGovernor,
+    refusal_event: Any,
+) -> AsyncIterator[bytes]:
+    """Collect the whole answer, govern it, then emit. No blind spot."""
+    completion = _echo_completion(upstream_body, str(upstream_body.get("model", "unknown")))
+    if UPSTREAM_MODE != "echo":
+        response = await _upstream.post(
+            "/v1/chat/completions",
+            json={**upstream_body, "stream": False},
+            headers={"Authorization": f"Bearer {UPSTREAM_KEY}"},
+        )
+        response.raise_for_status()
+        completion = response.json()
+
+    text = _completion_text(completion)
+    await governor.feed(text)
+    final = await governor.finish()
+    if final is None:
+        yield sse(DONE)
+        return
+    if final.is_refusal:
+        yield sse(refusal_event(final.refusal or ""))
+    elif final.text:
+        yield sse(rebuild_delta({"choices": [{"index": 0, "delta": {}}]}, final.text))
+    yield sse(DONE)
+
+
+@asynccontextmanager
+async def _echo_stream(body: dict[str, Any], model: str) -> AsyncIterator[AsyncIterator[bytes]]:
+    """A local stand-in that streams, so the demo exercises the real path."""
+    text = _messages_text(body.get("messages") or [])
+    answer = f"[echo upstream] the model received:\n\n{text}"
+
+    async def frames() -> AsyncIterator[bytes]:
+        for index in range(0, len(answer), 24):
+            yield sse(
+                {
+                    "id": "chatcmpl-echo",
+                    "model": model,
+                    "choices": [{"index": 0, "delta": {"content": answer[index : index + 24]}}],
+                }
+            )
+            await asyncio.sleep(0)
+        yield sse(DONE)
+
+    yield frames()
 
 
 def _completion_text(completion: dict[str, Any]) -> str:

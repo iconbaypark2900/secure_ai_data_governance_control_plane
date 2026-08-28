@@ -64,10 +64,21 @@ class Settings(BaseSettings):
         "through this process invalidate it immediately.",
     )
     max_scan_chars: int = Field(
-        default=1_000_000,
-        description="Ceiling on how much of a payload is classified. A larger "
-        "payload is scanned up to this point and reported as truncated, so a "
-        "clean result is never mistaken for a complete one.",
+        default=65_536,
+        description="Ceiling on how much of a payload is classified. Beyond this "
+        "the payload is scanned up to the limit and the decision is marked "
+        "payload_truncated, so a clean result is never mistaken for a complete "
+        "one. Sized against wall-clock, not appetite: classification costs about "
+        "0.6 ms per KB, so 64 KiB is roughly 40 ms of CPU. The previous default "
+        "of 1,000,000 was 600 ms -- long enough for one oversized payload to "
+        "stall every other request sharing that worker.",
+    )
+    scan_in_thread: bool = Field(
+        default=True,
+        description="Run classification off the event loop. Regex matching is "
+        "CPU-bound and only partially releases the GIL, so this buys little "
+        "throughput -- but it stops one large payload from blocking every "
+        "concurrent request's I/O, which is what actually shows up as latency.",
     )
     #: Fail closed if the policy engine errors. Turning this off trades safety for uptime.
     fail_closed: bool = True
@@ -89,6 +100,13 @@ class Settings(BaseSettings):
         default=SecretStr(""),
         description="Key sealing the audit hash chain. Without it the chain proves "
         "only ordering, not authenticity.",
+    )
+    api_key_pepper: SecretStr = Field(
+        default=SecretStr(""),
+        description="Mixed into every stored API key digest. Optional -- keys "
+        "carry 192 bits of entropy, so the digest is not brute-forceable "
+        "without it -- but setting one means a database dump alone cannot be "
+        "used to check guesses offline. Changing it invalidates every issued key.",
     )
     tokenization_key: SecretStr = Field(
         default=SecretStr(""),

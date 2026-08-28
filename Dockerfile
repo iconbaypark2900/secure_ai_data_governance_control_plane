@@ -47,4 +47,8 @@ EXPOSE 8000
 HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \
   CMD curl -fsS http://localhost:8000/v1/health || exit 1
 
-CMD ["uvicorn", "control_plane.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Classification is CPU-bound and only partially releases the GIL, so one worker
+# is one core however many requests arrive. WEB_CONCURRENCY is uvicorn's own
+# variable; leaving it unset keeps the single-process behaviour that is easier to
+# debug, and setting it is how a deployment gets more than one core's worth.
+CMD ["sh", "-c", "exec uvicorn control_plane.main:app --host 0.0.0.0 --port 8000 ${WEB_CONCURRENCY:+--workers $WEB_CONCURRENCY}"]

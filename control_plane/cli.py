@@ -763,15 +763,25 @@ def serve(
     host: Annotated[str, typer.Option()] = "0.0.0.0",  # noqa: S104
     port: Annotated[int, typer.Option()] = 8000,
     reload: Annotated[bool, typer.Option(help="Reload on source changes.")] = False,
+    workers: Annotated[
+        int,
+        typer.Option(
+            help="Worker processes. Classification is CPU-bound and only partly "
+            "releases the GIL, so this is what raises throughput; threads do not."
+        ),
+    ] = 1,
 ) -> None:
     """Run the API server."""
     import uvicorn
 
+    if reload and workers > 1:
+        fail("--reload and --workers are mutually exclusive")
     uvicorn.run(
         "control_plane.main:app",
         host=host,
         port=port,
         reload=reload,
+        workers=None if reload else workers,
         log_config=None,
     )
 

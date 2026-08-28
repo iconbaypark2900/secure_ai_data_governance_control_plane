@@ -21,11 +21,13 @@ deny with the failure recorded, never an allow-by-accident.
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any
 
 import structlog
@@ -108,7 +110,7 @@ class PolicyDecisionPoint:
         try:
             enriched_principal = await self._enrich_principal(request.principal)
             resolved = await self._catalog.resolve(request.resource.urn)
-            scan = self._scan(request)
+            scan = await self._scan(request)
             findings = self._filter_findings(scan, request.options.min_confidence)
 
             catalog_labels = set(resolved.label_keys)
@@ -117,6 +119,7 @@ class PolicyDecisionPoint:
             all_labels = sorted(catalog_labels | declared_labels | payload_labels)
 
             access = AccessRequest(
+                env={"payload_truncated": scan.truncated, "payload_scanned": scan.scanned_chars},
                 principal=enriched_principal,
                 action=request.action,
                 resource=Resource(
@@ -171,6 +174,7 @@ class PolicyDecisionPoint:
         decision = self._guard_tokenization(decision)
 
         response = self._build_response(request, decision, findings, all_labels)
+        response.payload_truncated = scan.truncated
         response.approval_error = approval_error
         response.approval_redeemed = approval is not None
         if approval is not None:
@@ -218,12 +222,26 @@ class PolicyDecisionPoint:
         attributes = await self._catalog.enrich_principal(principal.id, principal.attributes)
         return Principal(id=principal.id, type=principal.type, attributes=attributes)
 
-    def _scan(self, request: DecideRequest) -> ScanResult:
+    async def _scan(self, request: DecideRequest) -> ScanResult:
+        """Classify the payload, off the event loop unless told otherwise.
+
+        Regex matching is CPU-bound. Run inline it holds the loop for the whole
+        scan, which stalls every other request's database round trip too -- so a
+        single large payload degrades latency for everything sharing the worker,
+        not just for itself.
+        """
         if request.payload is None or not request.options.scan_payload:
             return ScanResult()
-        if isinstance(request.payload, str):
-            return self._scanner.scan_text(request.payload)
-        return self._scanner.scan_structured(request.payload)
+
+        payload = request.payload
+        work = (
+            partial(self._scanner.scan_text, payload)
+            if isinstance(payload, str)
+            else partial(self._scanner.scan_structured, payload)
+        )
+        if not self._settings.scan_in_thread:
+            return work()
+        return await asyncio.to_thread(work)
 
     @staticmethod
     def _filter_findings(scan: ScanResult, min_confidence: float) -> tuple[Finding, ...]:

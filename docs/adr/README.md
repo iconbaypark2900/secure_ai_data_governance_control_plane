@@ -16,3 +16,5 @@ costs — the last part being the one that is never reconstructible afterwards.
 | [0008](0008-discovery-uses-named-sources.md) | Run discovery against named, server-side sources |
 | [0009](0009-tokenisation-without-a-vault.md) | Make the token the ciphertext, so there is no vault to steal |
 | [0010](0010-declare-only-what-is-implemented.md) | Implement an obligation or remove it; nothing in between |
+| [0011](0011-api-keys-use-a-fast-keyed-hash.md) | Stop paying 82 ms of Argon2 to protect a 192-bit secret |
+| [0012](0012-streaming-governance.md) | Govern streamed answers behind a hold-back window |

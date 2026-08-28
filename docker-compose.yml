@@ -48,10 +48,14 @@ services:
       CP_AUDIT_HMAC_KEY: ${CP_AUDIT_HMAC_KEY:?set CP_AUDIT_HMAC_KEY in .env}
       CP_REDACTION_HMAC_KEY: ${CP_REDACTION_HMAC_KEY:?set CP_REDACTION_HMAC_KEY in .env}
       CP_BOOTSTRAP_ADMIN_KEY: ${CP_BOOTSTRAP_ADMIN_KEY:-}
+      CP_API_KEY_PEPPER: ${CP_API_KEY_PEPPER:-}
       CP_DEFAULT_EFFECT: ${CP_DEFAULT_EFFECT:-deny}
       CP_AUTH_DISABLED: ${CP_AUTH_DISABLED:-false}
       CP_CORS_ORIGINS: ${CP_CORS_ORIGINS:-http://localhost:5173,http://localhost:8000}
       CP_LOG_JSON: ${CP_LOG_JSON:-true}
+      # One worker is one core. Classification is CPU-bound, so this is the knob
+      # that actually raises decision throughput; see the README's Cost section.
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-4}
     ports:
       - "${CP_PORT:-8000}:8000"
     depends_on:
@@ -88,6 +92,10 @@ services:
       PEP_UPSTREAM_KEY: ${PEP_UPSTREAM_KEY:-}
       PEP_DESTINATION: ${PEP_DESTINATION:-external}
       PEP_FAIL_CLOSED: ${PEP_FAIL_CLOSED:-true}
+      # 'window' streams behind a hold-back margin; 'buffer' waits for the
+      # whole answer. See docs/adr/0012-streaming-governance.md.
+      PEP_STREAM_MODE: ${PEP_STREAM_MODE:-window}
+      PEP_STREAM_WINDOW_CHARS: ${PEP_STREAM_WINDOW_CHARS:-1024}
     ports:
       - "${PEP_PORT:-8100}:8100"
     depends_on:
