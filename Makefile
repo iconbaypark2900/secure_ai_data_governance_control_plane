@@ -72,6 +72,10 @@ test-pg: ## Run the suite including Postgres integration tests
 	CP_TEST_POSTGRES_URL=postgresql+asyncpg://control_plane:control_plane@localhost:5432/control_plane_test \
 	  $(PY) -m pytest
 
+test-qdrant: ## Run the suite including Qdrant integration tests
+	CP_TEST_QDRANT_URL=$${CP_TEST_QDRANT_URL:-http://localhost:6333} \
+	  $(PY) -m pytest tests/integration/test_qdrant_adapter.py
+
 lint: ## Check formatting and lint rules
 	.venv/bin/ruff check .
 	.venv/bin/ruff format --check .

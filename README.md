@@ -572,7 +572,9 @@ disagree.
   append-ordered table are the oldest and least representative)
 - **Qdrant** — enumerates collections and samples payloads, because a collection
   built from a customer table inherits its sensitivity without inheriting its
-  controls
+  controls. Records the vector names too: a named vector is named after the
+  embedding model that produced it, and if that model is hosted outside the
+  boundary the collection is a record of an egress
 - **MCP** — maps `tool → resource`, `arguments → payload`, so an agent handing a
   customer record to a web search is a governed event
 - **LibreChat** — maps users and agents to principals, uploads to assets, and
@@ -582,6 +584,12 @@ The first two can back a discovery source. The last two map identifiers and buil
 decision requests — there is nothing to enumerate without a live client session —
 so naming one as a source is refused with that explanation rather than quietly
 doing nothing.
+
+An adapter reports failure through `AdapterError`, and that is load-bearing: the
+discovery runner catches it and returns a report naming the source that failed,
+while anything else escapes and takes the run down with a traceback. A wrong URL,
+a stale API key, and a collection deleted between enumeration and sampling all
+have to arrive as adapter errors, because all three are things operators do.
 
 ---
 
@@ -604,7 +612,7 @@ pep/reverse_proxy/  the reference enforcement point
 ui/                 the admin console (React + TypeScript)
 seed/               the reference policy set and catalog
 migrations/         Alembic, including the append-only trigger
-tests/              617 tests
+tests/              641 tests
 docs/               architecture, the policy language, and the decision records
 ```
 
@@ -661,16 +669,25 @@ string of each denial.
 ## Testing
 
 ```bash
-make test      # 590 tests on SQLite, no external dependencies
-make test-pg   # + 7 that need real Postgres
-make check     # ruff, mypy, and the suite — everything CI runs
+make test        # 606 tests on SQLite, no external dependencies
+make test-pg     # + those that need real Postgres
+make test-qdrant # + those that need a real Qdrant
+make check       # ruff, mypy, and the suite — everything CI runs
 ```
 
-The Postgres-only tests cover what SQLite cannot demonstrate: the advisory lock
-that keeps twelve concurrent audit writers producing one unbroken chain, the
-append-only trigger, JSONB containment, and the Postgres adapter's own queries —
-which is where two real bugs were found, because query construction is not
+The service-backed tests cover what a fake cannot demonstrate, and CI runs both
+services so they never quietly go back to skipping.
+
+Postgres: the advisory lock that keeps twelve concurrent audit writers producing
+one unbroken chain, the append-only trigger, JSONB containment, and the adapter's
+own queries — where two real bugs were found, because query construction is not
 something a fake can check.
+
+Qdrant: the adapter's assumptions about someone else's API, which is a different
+kind of untestable. A fake written by the author of the code under test agrees
+with it by construction. Pointing the adapter at a real instance found two
+defects immediately, and the recorded response bodies in the unit tests come from
+that instance rather than from imagination.
 
 `tests/integration/test_seed_policies.py` tests the *shipped policy set* against
 its own descriptions. A reference policy set that reads well and denies the wrong

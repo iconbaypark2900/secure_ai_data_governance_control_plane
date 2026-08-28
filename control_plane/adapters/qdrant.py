@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 
 from control_plane.adapters.base import (
+    AdapterError,
     AdapterUnavailable,
     DiscoveredAsset,
     Sample,
@@ -60,22 +61,66 @@ class QdrantAdapter:
     def urn_for(self, collection: str) -> str:
         return f"qdrant://{collection}"
 
-    async def health(self) -> bool:
+    async def _get(self, path: str) -> Any:
+        """GET and decode, translating every failure into the adapter contract.
+
+        Callers up the stack catch ``AdapterError``; anything else escapes as a
+        traceback and takes the whole discovery run with it. Qdrant answers with
+        status codes far more often than it refuses a connection -- a stale API
+        key, a URL pointing at a different service, a collection deleted between
+        enumeration and sampling -- so those have to arrive as adapter errors.
+        """
         try:
-            response = await self._http().get("/healthz")
-            return response.status_code == 200
-        except (httpx.TimeoutException, httpx.TransportError):
+            response = await self._http().get(path)
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise AdapterUnavailable(f"qdrant at {self.base_url} is unreachable: {exc}") from exc
+        return self._decode(response, path)
+
+    def _decode(self, response: httpx.Response, path: str) -> Any:
+        if response.status_code in (401, 403):
+            raise AdapterUnavailable(
+                f"qdrant at {self.base_url} rejected our credentials for {path} "
+                f"({response.status_code}): check the configured api_key."
+            )
+        if response.status_code >= 500:
+            raise AdapterUnavailable(
+                f"qdrant at {self.base_url} failed on {path}: {response.status_code}."
+            )
+        if response.status_code >= 400:
+            raise AdapterError(f"qdrant refused {path}: {response.status_code}.")
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise AdapterError(
+                f"{self.base_url} answered {path} with something that is not JSON; "
+                f"is this really a qdrant instance?"
+            ) from exc
+        if not isinstance(body, dict) or "result" not in body:
+            raise AdapterError(
+                f"{self.base_url} answered {path} without a 'result' key; "
+                f"is this really a qdrant instance?"
+            )
+        return body["result"]
+
+    async def health(self) -> bool:
+        """Whether this adapter can actually do its job against the instance.
+
+        Deliberately not ``/healthz``. That endpoint answers 200 without an API
+        key even on an instance that requires one -- verified against qdrant
+        1.19 -- so a liveness probe reports green on the single most common
+        misconfiguration, and discovery then fails on the next call. Health here
+        means authorised enumeration, because that is what discovery needs.
+        """
+        try:
+            await self._get("/collections")
+        except AdapterError:
             return False
+        return True
 
     async def discover(self) -> Sequence[DiscoveredAsset]:
         """List collections, with their vector configuration as attributes."""
-        try:
-            response = await self._http().get("/collections")
-            response.raise_for_status()
-        except (httpx.TimeoutException, httpx.TransportError) as exc:
-            raise AdapterUnavailable(f"qdrant at {self.base_url} is unreachable: {exc}") from exc
-
-        collections = response.json().get("result", {}).get("collections", [])
+        result = await self._get("/collections")
+        collections = result.get("collections", []) if isinstance(result, dict) else []
         discovered: list[DiscoveredAsset] = []
         for entry in collections:
             name = entry.get("name")
@@ -83,15 +128,20 @@ class QdrantAdapter:
                 continue
             attributes: dict[str, Any] = {"source": "qdrant"}
             try:
-                detail = await self._http().get(f"/collections/{name}")
-                if detail.status_code == 200:
-                    result = detail.json().get("result", {})
-                    attributes["points_count"] = result.get("points_count")
-                    attributes["vector_size"] = _vector_size(result)
-            except (httpx.TimeoutException, httpx.TransportError):
+                detail = await self._get(f"/collections/{name}")
+            except AdapterError:
                 # Detail is a nicety; a collection we can name is still worth
                 # registering, and registering it is what makes it governable.
-                pass
+                detail = None
+            if isinstance(detail, dict):
+                attributes["points_count"] = detail.get("points_count")
+                attributes["vector_size"] = _vector_size(detail)
+                names = _vector_names(detail)
+                if names:
+                    # Named vectors carry the embedding model. Which model read
+                    # the data is a governance fact: an externally hosted one
+                    # means the collection is a record of an egress.
+                    attributes["vector_names"] = names
             discovered.append(
                 DiscoveredAsset(
                     urn=self.urn_for(name),
@@ -111,23 +161,23 @@ class QdrantAdapter:
         personal data lives.
         """
         collection = urn.removeprefix("qdrant://")
+        path = f"/collections/{collection}/points/scroll"
         try:
             response = await self._http().post(
-                f"/collections/{collection}/points/scroll",
+                path,
                 json={"limit": limit, "with_payload": True, "with_vector": False},
             )
-            response.raise_for_status()
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             raise AdapterUnavailable(f"qdrant at {self.base_url} is unreachable: {exc}") from exc
 
-        result = response.json().get("result", {})
-        points = result.get("points", [])
+        result = self._decode(response, path)
+        points = result.get("points", []) if isinstance(result, dict) else []
         payloads = [point.get("payload") for point in points if point.get("payload")]
         yield Sample(
             urn=urn,
             content=payloads,
             record_count=len(payloads),
-            partial=result.get("next_page_offset") is not None,
+            partial=isinstance(result, dict) and result.get("next_page_offset") is not None,
         )
 
 
@@ -146,3 +196,12 @@ def _vector_size(result: dict[str, Any]) -> Any:
             if isinstance(value, dict) and "size" in value:
                 return value["size"]
     return None
+
+
+def _vector_names(result: dict[str, Any]) -> list[str]:
+    """The configured vector names, which in practice name the embedding model."""
+    config = result.get("config")
+    vectors = config.get("params", {}).get("vectors") if isinstance(config, dict) else None
+    if not isinstance(vectors, dict) or "size" in vectors:
+        return []
+    return sorted(k for k, v in vectors.items() if isinstance(v, dict))

@@ -32,6 +32,17 @@ jobs:
           --health-cmd "pg_isready -U control_plane"
           --health-interval 5s --health-timeout 3s --health-retries 20
 
+      # Pinned, and with an API key set. Both matter: the adapter encodes
+      # assumptions about qdrant's response shapes, and the authenticated case
+      # is the one that exposed a health check reporting green on a
+      # misconfiguration. Without a live instance these tests skip, which is
+      # how the adapter shipped untested in the first place.
+      qdrant:
+        image: qdrant/qdrant:v1.19.0
+        env:
+          QDRANT__SERVICE__API_KEY: ci-qdrant-key
+        ports: ["6333:6333"]
+
     steps:
       - uses: actions/checkout@v4
 
@@ -56,6 +67,8 @@ jobs:
       - name: Test
         env:
           CP_TEST_POSTGRES_URL: postgresql+asyncpg://control_plane:control_plane@localhost:5432/control_plane_test
+          CP_TEST_QDRANT_URL: http://localhost:6333
+          CP_TEST_QDRANT_API_KEY: ci-qdrant-key
         run: .venv/bin/python -m pytest --cov=control_plane --cov-report=term-missing
 
       # The shipped policy set is a deliverable. A syntax error in it is a
