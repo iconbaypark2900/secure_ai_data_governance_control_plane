@@ -1,0 +1,31 @@
+project:
+  name: secure_ai_data_governance_control_plane
+  machine: dgx_spark
+  local_path: /home/iconbaypark2900/dataScience/secure_ai_data_governance_control_plane
+  origin: git@github.com:iconbaypark2900/secure_ai_data_governance_control_plane.git
+  branch: main
+  category: data_science
+  portfolio_status: active
+  maturity_phase: prototype
+  task_phase: intake
+runtime:
+  gpu_required: false
+  runtime_type: python
+  stack:
+  - python
+validation:
+  commands:
+  - cd ~/dataScience/secure_ai_data_governance_control_plane && liaison doctor
+risks:
+- data-governance
+- access-control
+- sensitive-data-handling
+liaison:
+  recommended_agents:
+  - hermes
+  - codex
+  patterns:
+  - security
+next_actions:
+- Add test suite and SECURITY.md to enable security profile
+- Define data governance policy docs

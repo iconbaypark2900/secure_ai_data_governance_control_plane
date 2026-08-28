@@ -19,11 +19,14 @@ ui/dist/
 
 # Environment / secrets
 .env
-.env.local
+.env.*
+# ...but the template is the documentation for every setting, so it stays.
+!.env.example
 *.pem
 *.key
 
 # Local state
+*.log
 *.sqlite
 *.sqlite3
 data/
