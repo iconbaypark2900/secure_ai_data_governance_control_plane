@@ -1,4 +1,8 @@
-"""The audit chain's storage row.
+"""The audit chain's storage rows.
+
+Records are keyed by ``(stream, seq)``. Each stream is an independent chain, so
+appends to different streams do not contend for the same lock -- which is what
+lets the log keep up with a system that is itself horizontally scaled.
 
 Nothing in this table may be updated. The application never issues an UPDATE
 against it, and the migration adds a database-level trigger enforcing that, so
@@ -10,10 +14,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, Index, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Index, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from control_plane.audit.chain import AuditRecord
+from control_plane.audit.chain import DEFAULT_STREAM, AuditRecord
 from control_plane.models.base import Base, TZDateTime
 
 
@@ -22,12 +26,17 @@ class AuditRecordRow(Base):
 
     __tablename__ = "audit_records"
     __table_args__ = (
-        UniqueConstraint("seq", name="uq_audit_records_seq"),
         Index("ix_audit_records_event_ts", "event", "timestamp"),
         Index("ix_audit_records_subject", "subject"),
         Index("ix_audit_records_actor", "actor"),
     )
 
+    #: Which chain this record belongs to. Part of the key, because sequence
+    #: numbers restart per stream, and part of the signed body, so a record
+    #: cannot be moved between chains and still verify.
+    stream: Mapped[str] = mapped_column(
+        String(64), primary_key=True, default=DEFAULT_STREAM, index=True
+    )
     seq: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     timestamp: Mapped[datetime] = mapped_column(TZDateTime, nullable=False, index=True)
     event: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -42,6 +51,7 @@ class AuditRecordRow(Base):
     def to_record(self) -> AuditRecord:
         """Convert back to the pure form the verifier works with."""
         return AuditRecord(
+            stream=self.stream,
             seq=self.seq,
             timestamp=self.timestamp,
             event=self.event,
@@ -55,6 +65,7 @@ class AuditRecordRow(Base):
     @classmethod
     def from_record(cls, record: AuditRecord, note: str = "") -> AuditRecordRow:
         return cls(
+            stream=record.stream,
             seq=record.seq,
             timestamp=record.timestamp,
             event=record.event,

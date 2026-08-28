@@ -699,32 +699,102 @@ def key_revoke(prefix: str) -> None:
 
 @audit_app.command("verify")
 def audit_verify(
+    stream: Annotated[
+        str | None, typer.Option(help="Verify one stream. Omit to check them all.")
+    ] = None,
     start: Annotated[int, typer.Option(help="First sequence number to check.")] = 1,
     end: Annotated[int | None, typer.Option(help="Last sequence number to check.")] = None,
 ) -> None:
-    """Recompute the hash chain and report any tampering."""
+    """Recompute the chains and report any tampering.
+
+    Without --stream this also holds the streams against the most recent
+    checkpoint, which is the only thing that notices a whole chain being gone.
+    """
 
     async def inner() -> None:
         async with session_scope() as session:
-            result = await AuditService(session).verify(start_seq=start, end_seq=end)
-        if result.valid:
+            audit = AuditService(session)
+            summary: dict[str, Any]
+            if stream is not None:
+                result = await audit.verify(stream=stream, start_seq=start, end_seq=end)
+                summary = {
+                    "valid": result.valid,
+                    "streams": {stream: result.to_dict()},
+                    "checkpoint": {"checked": 0, "message": "not evaluated"},
+                    "message": result.message,
+                }
+            else:
+                summary = await audit.verify_all()
+
+        if summary["valid"]:
             console.print(
-                Panel(
-                    f"[green]{result.message}[/]",
-                    title="audit chain",
-                    border_style="green",
-                )
+                Panel(f"[green]{summary['message']}[/]", title="audit", border_style="green")
             )
             return
-        body = [f"[red]{result.message}[/]"]
-        if result.corrupted:
-            body.append(f"records with an altered digest: {list(result.corrupted)}")
-        if result.broken_links:
-            body.append(f"records whose predecessor link is wrong: {list(result.broken_links)}")
-        if result.sequence_errors:
-            body.append(f"gaps or repeats at: {list(result.sequence_errors)}")
-        console.print(Panel("\n".join(body), title="audit chain", border_style="red"))
+
+        body = [f"[red]{summary['message']}[/]", ""]
+        for name, result in sorted(summary["streams"].items()):
+            if result["valid"]:
+                continue
+            body.append(f"[bold]{name}[/]")
+            if result["corrupted"]:
+                body.append(f"  altered digests: {result['corrupted']}")
+            if result["broken_links"]:
+                body.append(f"  broken predecessor links: {result['broken_links']}")
+            if result["sequence_errors"]:
+                body.append(f"  gaps or repeats: {result['sequence_errors']}")
+        checkpoint = summary.get("checkpoint", {})
+        for label, key in (
+            ("streams missing entirely", "missing"),
+            ("streams shorter than vouched for", "truncated"),
+            ("streams rewritten beneath the checkpoint", "diverged"),
+        ):
+            if checkpoint.get(key):
+                body.append(f"[bold]{label}:[/] {', '.join(checkpoint[key])}")
+        console.print(Panel("\n".join(body), title="audit", border_style="red"))
         raise typer.Exit(code=2)
+
+    run(inner())
+
+
+@audit_app.command("checkpoint")
+def audit_checkpoint() -> None:
+    """Seal a record of where every stream has reached.
+
+    Worth running on a schedule. Per-stream verification proves each chain is
+    internally consistent; only a checkpoint notices a whole chain going missing.
+    """
+
+    async def inner() -> None:
+        async with session_scope() as session:
+            record = await AuditService(session).checkpoint(actor="cpctl")
+        console.print(
+            Panel(
+                f"sealed at seq {record.seq} of {record.stream}\n\n"
+                f"[dim]streams:[/] {record.payload['stream_count']}\n"
+                f"[dim]records vouched for:[/] {record.payload['total_records']}",
+                title="checkpoint",
+                border_style="green",
+            )
+        )
+
+    run(inner())
+
+
+@audit_app.command("streams")
+def audit_streams() -> None:
+    """Show the independent chains the log is split across."""
+
+    async def inner() -> None:
+        async with session_scope() as session:
+            heads = await AuditService(session).stream_heads()
+        if not heads:
+            console.print("[dim]no records yet[/]")
+            return
+        table = Table("stream", "records", "head")
+        for head in heads:
+            table.add_row(head.stream, str(head.seq), head.head_hash[:16] + "…")
+        console.print(table)
 
     run(inner())
 
@@ -739,9 +809,10 @@ def audit_tail(
     async def inner() -> None:
         async with session_scope() as session:
             rows = await AuditService(session).list_records(limit=limit, event=event)
-            table = Table("seq", "when", "event", "actor", "subject")
+            table = Table("stream", "seq", "when", "event", "actor", "subject")
             for row in reversed(rows):
                 table.add_row(
+                    row.stream,
                     str(row.seq),
                     row.timestamp.isoformat(timespec="seconds"),
                     row.event,

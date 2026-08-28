@@ -96,6 +96,16 @@ class Settings(BaseSettings):
         description="Key for deterministic pseudonymisation. Rotating it breaks "
         "the ability to join previously hashed values.",
     )
+    audit_partitions: int = Field(
+        default=1,
+        ge=1,
+        le=64,
+        description="How many independent audit chains to spread appends across. "
+        "One chain means one lock, which serialises every decision in the system; "
+        "more means concurrency, at the cost that per-stream verification alone "
+        "cannot notice a whole stream going missing -- take checkpoints. "
+        "Partitioned by actor, so a busy single caller does not spread.",
+    )
     audit_hmac_key: SecretStr = Field(
         default=SecretStr(""),
         description="Key sealing the audit hash chain. Without it the chain proves "

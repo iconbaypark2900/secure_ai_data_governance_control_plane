@@ -19,3 +19,4 @@ costs — the last part being the one that is never reconstructible afterwards.
 | [0011](0011-api-keys-use-a-fast-keyed-hash.md) | Stop paying 82 ms of Argon2 to protect a 192-bit secret |
 | [0012](0012-streaming-governance.md) | Govern streamed answers behind a hold-back window |
 | [0013](0013-routing-is-a-policy-outcome.md) | Make routing an obligation, and models catalog assets |
+| [0014](0014-audit-streams-and-checkpoints.md) | Split the audit log into many chains, and checkpoint the set |

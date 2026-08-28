@@ -329,14 +329,29 @@ is not enough to *perform* it.
 
 ```bash
 $ cpctl audit verify
-chain intact across 47 record(s)
+4 stream(s) intact across 1,208 record(s); checkpoint matches
 
 $ # after someone edits a row directly in Postgres
 $ cpctl audit verify
-chain verification failed: 1 record(s) with an invalid digest; 1 broken link(s)
-  records with an altered digest: [23]
-  records whose predecessor link is wrong: [24]
+stream(s) failing verification: p2
+  p2
+    altered digests: [23]
+    broken predecessor links: [24]
 ```
+
+The log is **many chains, not one**. A single global lock meant every decision in
+the system serialised behind the logging of every other one; records now belong
+to a stream, each with its own chain and its own lock — worth about 2× throughput
+and 3× on p50. Partitioned by actor, so one principal's history stays in one
+chain and an investigator reads one stream rather than all of them.
+
+That trade has a cost, and it is bought back rather than ignored: per-stream
+verification proves each chain is internally consistent and says nothing about
+how many chains there should be, so deleting one entirely would leave everything
+remaining verifying perfectly. **Checkpoints** record where every stream had
+reached, in a chain of their own, and `verify` holds the streams against the
+latest one. Take them on a schedule; a deployment that shards and never
+checkpoints is weaker than one that never sharded.
 
 Detection is the backstop. Prevention comes first: a database trigger makes
 `UPDATE`, `DELETE`, and `TRUNCATE` on the audit table fail outright, so the
@@ -555,7 +570,7 @@ pep/reverse_proxy/  the reference enforcement point
 ui/                 the admin console (React + TypeScript)
 seed/               the reference policy set and catalog
 migrations/         Alembic, including the append-only trigger
-tests/              550 tests
+tests/              594 tests
 docs/               architecture, the policy language, and the decision records
 ```
 
@@ -612,7 +627,7 @@ string of each denial.
 ## Testing
 
 ```bash
-make test      # 517 tests on SQLite, no external dependencies
+make test      # 546 tests on SQLite, no external dependencies
 make test-pg   # + 7 that need real Postgres
 make check     # ruff, mypy, and the suite — everything CI runs
 ```

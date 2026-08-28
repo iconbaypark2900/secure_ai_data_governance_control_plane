@@ -44,6 +44,13 @@ __all__ = [
 #: The predecessor digest of the first record in a chain.
 GENESIS_HASH = "0" * 64
 
+#: The stream every record goes to when nothing else is configured.
+DEFAULT_STREAM = "default"
+
+#: Where checkpoints live. Reserved: a checkpoint records the head of every other
+#: stream, so it cannot be one of the streams it is vouching for.
+CHECKPOINT_STREAM = "_checkpoints"
+
 
 class AuditEvent(StrEnum):
     """The event types the control plane records."""
@@ -66,6 +73,7 @@ class AuditEvent(StrEnum):
     APPROVAL_REDEEMED = "approval.redeemed"
     KEY_ISSUED = "apikey.issued"
     KEY_REVOKED = "apikey.revoked"
+    CHECKPOINT = "audit.checkpoint"
     SCAN_COMPLETED = "scan.completed"
     CATALOG_DISCOVERED = "catalog.discovered"
     TOKENS_REVERSED = "tokens.reversed"
@@ -130,7 +138,14 @@ def content_digest(payload: Any, key: bytes = b"") -> str:
 
 @dataclass(frozen=True, slots=True)
 class AuditRecord:
-    """One immutable entry."""
+    """One immutable entry.
+
+    Records belong to a *stream*, and each stream is an independent chain with
+    its own sequence and head. Splitting the log this way is what lets appends
+    proceed concurrently -- one lock per stream rather than one for the whole
+    system -- and it is also what makes a whole stream's disappearance invisible
+    to per-stream verification, which is why checkpoints exist.
+    """
 
     seq: int
     timestamp: datetime
@@ -140,6 +155,7 @@ class AuditRecord:
     payload: Mapping[str, Any] = field(default_factory=dict)
     prev_hash: str = GENESIS_HASH
     record_hash: str = ""
+    stream: str = DEFAULT_STREAM
 
     def signing_body(self) -> str:
         """Exactly the bytes the digest covers.
@@ -147,24 +163,36 @@ class AuditRecord:
         The digest deliberately excludes any database-assigned identifier: the
         chain must verify identically whether it is read from Postgres, restored
         from a backup, or streamed to cold storage.
+
+        The stream is covered, so a record cannot be moved from one chain to
+        another and still verify -- but only when it is *not* the default. A
+        record in the default stream signs exactly the bytes it signed before
+        streams existed, so every digest written by an earlier version keeps
+        verifying after the upgrade. An audit chain whose whole value is holding
+        over time cannot afford a schema change that invalidates its history.
+
+        Moving a record still fails either way: into a named stream the field
+        appears, out of one it disappears, and both change the signed bytes.
         """
-        return canonical_json(
-            {
-                "seq": self.seq,
-                "timestamp": as_utc(self.timestamp).isoformat(),
-                "event": self.event,
-                "actor": self.actor,
-                "subject": self.subject,
-                "payload": self.payload,
-                "prev_hash": self.prev_hash,
-            }
-        )
+        body: dict[str, Any] = {
+            "seq": self.seq,
+            "timestamp": as_utc(self.timestamp).isoformat(),
+            "event": self.event,
+            "actor": self.actor,
+            "subject": self.subject,
+            "payload": self.payload,
+            "prev_hash": self.prev_hash,
+        }
+        if self.stream != DEFAULT_STREAM:
+            body["stream"] = self.stream
+        return canonical_json(body)
 
     def compute_hash(self, key: bytes) -> str:
         return hmac.new(key, self.signing_body().encode("utf-8"), hashlib.sha256).hexdigest()
 
     def with_hash(self, key: bytes) -> AuditRecord:
         return AuditRecord(
+            stream=self.stream,
             seq=self.seq,
             timestamp=self.timestamp,
             event=self.event,
@@ -181,6 +209,7 @@ class AuditRecord:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "stream": self.stream,
             "seq": self.seq,
             "timestamp": as_utc(self.timestamp).isoformat(),
             "event": self.event,
@@ -194,16 +223,24 @@ class AuditRecord:
 
 @dataclass
 class AuditChain:
-    """Builds successive records, carrying the running digest forward."""
+    """Builds successive records in one stream, carrying the digest forward."""
 
     key: bytes
     head_hash: str = GENESIS_HASH
     next_seq: int = 1
+    stream: str = DEFAULT_STREAM
 
     @classmethod
-    def resuming(cls, key: bytes, *, head_hash: str, next_seq: int) -> AuditChain:
+    def resuming(
+        cls, key: bytes, *, head_hash: str, next_seq: int, stream: str = DEFAULT_STREAM
+    ) -> AuditChain:
         """Continue an existing chain read back from storage."""
-        return cls(key=key, head_hash=head_hash or GENESIS_HASH, next_seq=max(1, next_seq))
+        return cls(
+            key=key,
+            head_hash=head_hash or GENESIS_HASH,
+            next_seq=max(1, next_seq),
+            stream=stream,
+        )
 
     def append(
         self,
@@ -216,6 +253,7 @@ class AuditChain:
     ) -> AuditRecord:
         """Seal one new record and advance the head."""
         record = AuditRecord(
+            stream=self.stream,
             seq=self.next_seq,
             timestamp=timestamp or datetime.now(UTC),
             event=str(event),
@@ -252,6 +290,120 @@ class ChainVerification:
             "sequence_errors": list(self.sequence_errors),
             "message": self.message,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class StreamHead:
+    """Where one stream had reached at some moment."""
+
+    stream: str
+    seq: int
+    head_hash: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"stream": self.stream, "seq": self.seq, "head_hash": self.head_hash}
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> StreamHead:
+        return cls(
+            stream=str(raw.get("stream", "")),
+            seq=int(raw.get("seq", 0)),
+            head_hash=str(raw.get("head_hash", "")),
+        )
+
+
+def checkpoint_payload(heads: Iterable[StreamHead]) -> dict[str, Any]:
+    """The body of a checkpoint record.
+
+    Splitting the log into independent streams buys concurrency and gives up one
+    property: per-stream verification cannot notice a stream that is *gone*. Each
+    surviving chain still verifies perfectly, and nothing says how many there
+    should have been.
+
+    A checkpoint closes that. It records where every stream had reached, sealed
+    into a chain of its own, so removing a stream -- or truncating one and
+    letting it re-grow -- contradicts a record that was already written.
+    """
+    ordered = sorted(heads, key=lambda h: h.stream)
+    return {
+        "streams": [head.to_dict() for head in ordered],
+        "stream_count": len(ordered),
+        "total_records": sum(head.seq for head in ordered),
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointVerification:
+    """What a checkpoint says about the streams it covered."""
+
+    valid: bool
+    checked: int = 0
+    #: Streams the checkpoint recorded that no longer exist at all.
+    missing: tuple[str, ...] = ()
+    #: Streams that have gone backwards -- fewer records than were vouched for.
+    truncated: tuple[str, ...] = ()
+    #: Streams whose record at the checkpointed sequence no longer has the
+    #: digest the checkpoint recorded, meaning history was rewritten beneath it.
+    diverged: tuple[str, ...] = ()
+    message: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "valid": self.valid,
+            "checked": self.checked,
+            "missing": list(self.missing),
+            "truncated": list(self.truncated),
+            "diverged": list(self.diverged),
+            "message": self.message,
+        }
+
+
+def verify_against_checkpoint(
+    recorded: Iterable[StreamHead], observed: Mapping[str, tuple[int, str]]
+) -> CheckpointVerification:
+    """Compare a checkpoint's claims against what the streams look like now.
+
+    ``observed`` maps a stream to its ``(seq, digest)`` at the sequence the
+    checkpoint named -- not its current head, which will have moved on.
+    """
+    missing: list[str] = []
+    truncated: list[str] = []
+    diverged: list[str] = []
+    checked = 0
+
+    for head in recorded:
+        checked += 1
+        current = observed.get(head.stream)
+        if current is None:
+            missing.append(head.stream)
+            continue
+        seq, digest = current
+        if seq < head.seq:
+            truncated.append(head.stream)
+        elif digest != head.head_hash:
+            diverged.append(head.stream)
+
+    valid = not (missing or truncated or diverged)
+    if valid:
+        message = f"all {checked} stream(s) match the checkpoint"
+    else:
+        parts = []
+        if missing:
+            parts.append(f"{len(missing)} stream(s) missing entirely")
+        if truncated:
+            parts.append(f"{len(truncated)} stream(s) shorter than vouched for")
+        if diverged:
+            parts.append(f"{len(diverged)} stream(s) rewritten beneath the checkpoint")
+        message = "checkpoint verification failed: " + "; ".join(parts)
+
+    return CheckpointVerification(
+        valid=valid,
+        checked=checked,
+        missing=tuple(missing),
+        truncated=tuple(truncated),
+        diverged=tuple(diverged),
+        message=message,
+    )
 
 
 def verify_chain(

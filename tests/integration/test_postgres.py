@@ -130,6 +130,125 @@ class TestConcurrentAppends:
             assert (await AuditService(session, key=audit_key).verify()).valid is True
 
 
+class TestShardedAppends:
+    """The reason for streams: one lock per chain, not one for the system."""
+
+    async def test_appends_to_different_streams_do_not_serialise(self, factory, audit_key) -> None:
+        async def append(index: int) -> None:
+            async with factory() as session:
+                await AuditService(session, key=audit_key, partitions=8).append(
+                    AuditEvent.DECISION,
+                    actor=f"agent:{index}",
+                    subject="qdrant://kb",
+                    payload={"index": index},
+                )
+                await session.commit()
+
+        await asyncio.gather(*(append(i) for i in range(48)))
+
+        async with factory() as session:
+            audit = AuditService(session, key=audit_key, partitions=8)
+            streams = await audit.streams()
+            assert len(streams) > 1, "48 distinct actors should reach several streams"
+            assert await audit.count() == 48
+
+            result = await audit.verify_all()
+            assert result["valid"] is True, result["message"]
+
+    async def test_each_stream_numbers_from_one(self, factory, audit_key) -> None:
+        async def append(index: int) -> None:
+            async with factory() as session:
+                await AuditService(session, key=audit_key, partitions=4).append(
+                    AuditEvent.DECISION, actor=f"agent:{index}", subject="s"
+                )
+                await session.commit()
+
+        await asyncio.gather(*(append(i) for i in range(24)))
+
+        async with factory() as session:
+            audit = AuditService(session, key=audit_key, partitions=4)
+            for stream in await audit.streams():
+                first = await audit.verify(stream=stream)
+                assert first.valid is True
+
+    async def test_an_explicit_stream_overrides_partitioning(self, factory, audit_key) -> None:
+        """How a tenant or a period gets its own independently verifiable slice."""
+        async with factory() as session:
+            audit = AuditService(session, key=audit_key, partitions=8)
+            await audit.append(
+                AuditEvent.DECISION, actor="agent:x", subject="s", stream="tenant-acme"
+            )
+            await session.commit()
+
+        async with factory() as session:
+            audit = AuditService(session, key=audit_key, partitions=8)
+            assert "tenant-acme" in await audit.streams()
+            assert (await audit.verify(stream="tenant-acme")).valid is True
+
+
+class TestCheckpointsOverStorage:
+    async def test_a_checkpoint_records_every_stream(self, factory, audit_key) -> None:
+        async with factory() as session:
+            audit = AuditService(session, key=audit_key, partitions=4)
+            for i in range(12):
+                await audit.append(AuditEvent.DECISION, actor=f"agent:{i}", subject="s")
+            record = await audit.checkpoint()
+            await session.commit()
+
+        assert record.payload["stream_count"] >= 1
+        assert record.payload["total_records"] == 12
+
+    async def test_verify_all_holds_the_streams_against_it(self, factory, audit_key) -> None:
+        async with factory() as session:
+            audit = AuditService(session, key=audit_key, partitions=4)
+            for i in range(12):
+                await audit.append(AuditEvent.DECISION, actor=f"agent:{i}", subject="s")
+            await audit.checkpoint()
+            await session.commit()
+
+        async with factory() as session:
+            result = await AuditService(session, key=audit_key, partitions=4).verify_all()
+            assert result["valid"] is True
+            assert result["checkpoint"]["valid"] is True
+
+    async def test_a_stream_deleted_after_a_checkpoint_is_caught(self, factory, audit_key) -> None:
+        """What per-stream verification alone cannot see.
+
+        The append-only trigger makes this impossible through the application,
+        so it is done here with the trigger disabled -- which is exactly the
+        privilege level the hash chain exists to defend against.
+        """
+        async with factory() as session:
+            audit = AuditService(session, key=audit_key, partitions=8)
+            for i in range(24):
+                await audit.append(AuditEvent.DECISION, actor=f"agent:{i}", subject="s")
+            await audit.checkpoint()
+            await session.commit()
+
+        async with factory() as session:
+            victim = (await AuditService(session, key=audit_key).streams())[0]
+            await session.execute(
+                text("ALTER TABLE audit_records DISABLE TRIGGER audit_records_append_only")
+            )
+            await session.execute(
+                text("DELETE FROM audit_records WHERE stream = :s"), {"s": victim}
+            )
+            await session.execute(
+                text("ALTER TABLE audit_records ENABLE TRIGGER audit_records_append_only")
+            )
+            await session.commit()
+
+        async with factory() as session:
+            audit = AuditService(session, key=audit_key, partitions=8)
+            # Every chain that survives still verifies perfectly on its own.
+            for stream in await audit.streams():
+                assert (await audit.verify(stream=stream)).valid is True
+            # The checkpoint is what notices one is gone.
+            result = await audit.verify_all()
+            assert result["valid"] is False
+            assert victim in result["checkpoint"]["missing"]
+
+
 class TestPostgresSchema:
     async def test_timestamps_round_trip_as_utc(self, factory, audit_key) -> None:
         """The chain must verify after a real storage round trip."""

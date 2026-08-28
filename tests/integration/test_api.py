@@ -313,7 +313,29 @@ class TestAuditEndpoint:
         await seeded.post("/v1/decide", json=decide_body())
         result = (await seeded.get("/v1/audit/verify")).json()
         assert result["valid"] is True
-        assert result["checked"] >= 3
+        assert sum(s["checked"] for s in result["streams"].values()) >= 3
+
+    async def test_a_single_stream_can_be_verified_alone(self, seeded) -> None:
+        await seeded.post("/v1/decide", json=decide_body())
+        result = (await seeded.get("/v1/audit/verify?stream=default")).json()
+        assert result["valid"] is True
+        assert "default" in result["streams"]
+
+    async def test_streams_are_listed_with_their_heads(self, seeded) -> None:
+        await seeded.post("/v1/decide", json=decide_body())
+        body = (await seeded.get("/v1/audit/streams")).json()
+        assert body["count"] >= 1
+        assert body["streams"][0]["head_hash"]
+
+    async def test_a_checkpoint_vouches_for_every_stream(self, seeded) -> None:
+        await seeded.post("/v1/decide", json=decide_body())
+        record = (await seeded.post("/v1/audit/checkpoint")).json()
+        assert record["event"] == "audit.checkpoint"
+        assert record["payload"]["stream_count"] >= 1
+
+        verified = (await seeded.get("/v1/audit/verify")).json()
+        assert verified["valid"] is True
+        assert verified["checkpoint"]["valid"] is True
 
     async def test_events_can_be_filtered(self, seeded) -> None:
         await seeded.post("/v1/decide", json=decide_body())
