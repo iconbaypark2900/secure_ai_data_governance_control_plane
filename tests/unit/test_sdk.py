@@ -298,3 +298,102 @@ class TestApprovalFlow:
         )
         with pytest.raises(ApprovalTimeout, match="still unresolved"):
             await client.await_approval("abc", timeout=0.01, poll_interval=0.001)
+
+
+class TestOutcomeReporting:
+    """Closing the loop between what was permitted and what happened."""
+
+    @staticmethod
+    def _recording():
+        seen: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            import json
+
+            if request.url.path.endswith("/outcome"):
+                seen.append({"path": request.url.path, **json.loads(request.content)})
+                return httpx.Response(200, json={"decision_id": "x", "outcome": "recorded"})
+            return httpx.Response(200, json=ALLOW_BODY)
+
+        return seen, handler
+
+    async def test_enforcing_reports_that_it_was_enforced(self) -> None:
+        seen, handler = self._recording()
+        client = client_with(handler)
+        decision = await client.decide(principal_id="a", action="read")
+
+        assert await client.enforce(decision) == "safe content"
+        assert seen[0]["outcome"] == "enforced"
+        assert seen[0]["discharged"] == ["redact"]
+
+    async def test_an_undischargeable_duty_reports_a_refusal(self) -> None:
+        """The case the whole feature exists for: permitted, and did not happen."""
+        seen, handler = self._recording()
+        client = client_with(handler)
+        decision = Decision.from_response(
+            {
+                **ALLOW_BODY,
+                "obligations": [{"type": "watermark", "text": "x"}],
+                "decision_id": "11111111-1111-1111-1111-111111111111",
+            }
+        )
+
+        with pytest.raises(ObligationUnsatisfied):
+            await client.enforce(decision)
+
+        assert seen[0]["outcome"] == "refused"
+        assert seen[0]["undischarged"] == ["watermark"]
+        assert "watermark" in seen[0]["reason"]
+
+    async def test_a_denial_is_not_reported(self) -> None:
+        """The record already says it was refused, and nothing was ever attempted."""
+        seen, handler = self._recording()
+        client = client_with(handler)
+        decision = Decision.from_response({"effect": "deny", "reason": "no", "decision_id": "d"})
+
+        with pytest.raises(DecisionDenied):
+            await client.enforce(decision)
+        assert seen == []
+
+    async def test_partial_names_what_went_undischarged(self) -> None:
+        seen, handler = self._recording()
+        client = client_with(handler)
+        decision = Decision.from_response(
+            {
+                **ALLOW_BODY,
+                "obligations": [{"type": "redact"}, {"type": "watermark"}],
+                "decision_id": "22222222-2222-2222-2222-222222222222",
+            }
+        )
+
+        await client.report_partial(
+            decision, undischarged=["watermark"], reason="the renderer was unavailable"
+        )
+        assert seen[0]["outcome"] == "partial"
+        assert seen[0]["discharged"] == ["redact"]
+        assert seen[0]["undischarged"] == ["watermark"]
+
+    async def test_reporting_never_fails_the_caller(self) -> None:
+        """The action has already happened; a bookkeeping round trip must not
+        turn a reporting problem into an outage."""
+
+        def unreachable(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/outcome"):
+                raise httpx.ConnectError("connection refused")
+            return httpx.Response(200, json=ALLOW_BODY)
+
+        client = client_with(unreachable, retries=0)
+        decision = await client.decide(principal_id="a", action="read")
+        assert await client.enforce(decision) == "safe content"
+
+    async def test_an_unpersisted_decision_has_nothing_to_report(self) -> None:
+        client = client_with(lambda _r: httpx.Response(200, json=ALLOW_BODY))
+        decision = Decision.from_response({**ALLOW_BODY, "decision_id": None})
+        assert await client.report_outcome(decision, "enforced") is False
+
+    async def test_outstanding_is_what_nobody_will_carry_out(self) -> None:
+        decision = Decision.from_response(
+            {**ALLOW_BODY, "obligations": [{"type": "redact"}, {"type": "route"}]}
+        )
+        assert decision.outstanding() == ["route"]
+        assert decision.outstanding(["route"]) == []

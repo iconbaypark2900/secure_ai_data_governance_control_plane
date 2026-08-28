@@ -13,9 +13,10 @@ be stable and explicit. Two rules govern the response:
 from __future__ import annotations
 
 import uuid
-from typing import Any, Literal
+from enum import StrEnum
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.policy.model import Principal, Resource
 
@@ -27,6 +28,9 @@ __all__ = [
     "DecideRequest",
     "DecideResponse",
     "FindingOut",
+    "Outcome",
+    "OutcomeOut",
+    "OutcomeReport",
     "RedactionOut",
     "SimulateRequest",
     "SimulateResponse",
@@ -258,3 +262,75 @@ class SimulateResponse(BaseModel):
     baseline: DecideResponse | None = None
     changed: bool = False
     policies_evaluated: int = 0
+
+
+class Outcome(StrEnum):
+    """What an enforcement point did with a decision.
+
+    ``partial`` is the one worth having. Without it a point that carried out
+    three obligations and skipped the fourth has to report either "enforced",
+    which is a lie, or "refused", which is also a lie -- and the useful signal,
+    that a duty is going undischarged in production, disappears into whichever
+    it picked.
+    """
+
+    #: The permitted action happened, and every obligation was carried out.
+    ENFORCED = "enforced"
+    #: The action did not happen. The decision permitted it; something here
+    #: could not or would not proceed.
+    REFUSED = "refused"
+    #: The action happened, but not every obligation was discharged.
+    PARTIAL = "partial"
+
+
+class OutcomeReport(BaseModel):
+    """What an enforcement point reports back after acting on a decision."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    outcome: Outcome
+    reason: str = Field(
+        default="",
+        max_length=1000,
+        description="Why, when the action did not fully happen. Required for "
+        "anything other than 'enforced': an unexplained refusal is a gap in the "
+        "record rather than an entry in it.",
+    )
+    discharged: list[str] = Field(
+        default_factory=list,
+        description="Obligation types actually carried out.",
+    )
+    undischarged: list[str] = Field(
+        default_factory=list,
+        description="Obligation types that were not. What makes 'partial' legible.",
+    )
+
+    @model_validator(mode="after")
+    def _explain_anything_short_of_enforced(self) -> Self:
+        if self.outcome is not Outcome.ENFORCED and not self.reason.strip():
+            raise ValueError(
+                f"an outcome of {self.outcome!r} needs a reason; an unexplained "
+                f"refusal is a gap in the record rather than an entry in it"
+            )
+        if self.outcome is Outcome.PARTIAL and not self.undischarged:
+            raise ValueError(
+                "a 'partial' outcome must name the obligations that were not "
+                "discharged, or it says nothing a 'refused' would not"
+            )
+        return self
+
+
+class OutcomeOut(BaseModel):
+    """The recorded outcome of a decision."""
+
+    decision_id: uuid.UUID
+    outcome: str | None = None
+    reason: str = ""
+    discharged: list[str] = Field(default_factory=list)
+    undischarged: list[str] = Field(default_factory=list)
+    reported_at: str | None = None
+    reported_by: str | None = None
+
+    @property
+    def reported(self) -> bool:
+        return self.outcome is not None

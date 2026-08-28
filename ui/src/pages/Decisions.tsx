@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { api } from "../lib/api";
 import { useAsync } from "../lib/useAsync";
-import { Banner, EffectPill, Empty, LabelTag, Loading, when } from "../components/atoms";
+import {
+  Banner, EffectPill, Empty, LabelTag, Loading, OutcomePill, when,
+} from "../components/atoms";
 import { Trace } from "../components/Trace";
 
 export function Decisions({
@@ -10,9 +12,15 @@ export function Decisions({
   openId: string | null; onOpen: (id: string | null) => void;
 }) {
   const [effect, setEffect] = useState("");
+  const [outcome, setOutcome] = useState("");
   const decisions = useAsync(
-    () => api.decisions({ limit: "100", ...(effect && { effect }) }),
-    [effect],
+    () =>
+      api.decisions({
+        limit: "100",
+        ...(effect && { effect }),
+        ...(outcome && { outcome }),
+      }),
+    [effect, outcome],
   );
 
   if (openId) return <DecisionDetail id={openId} onBack={() => onOpen(null)} />;
@@ -31,12 +39,21 @@ export function Decisions({
       <div className="card">
         <div className="spread">
           <h2 style={{ margin: 0 }}>{decisions.data?.total ?? 0} recorded</h2>
-          <select value={effect} onChange={(event) => setEffect(event.target.value)}>
-            <option value="">all effects</option>
-            <option value="allow">allow</option>
-            <option value="deny">deny</option>
-            <option value="require_approval">require approval</option>
-          </select>
+          <div className="row">
+            <select value={effect} onChange={(event) => setEffect(event.target.value)}>
+              <option value="">all effects</option>
+              <option value="allow">allow</option>
+              <option value="deny">deny</option>
+              <option value="require_approval">require approval</option>
+            </select>
+            <select value={outcome} onChange={(event) => setOutcome(event.target.value)}>
+              <option value="">any outcome</option>
+              <option value="enforced">enforced</option>
+              <option value="refused">refused downstream</option>
+              <option value="partial">partial</option>
+              <option value="unreported">unreported</option>
+            </select>
+          </div>
         </div>
 
         {decisions.error && <Banner kind="error">{decisions.error}</Banner>}
@@ -47,9 +64,8 @@ export function Decisions({
             <table>
               <thead>
                 <tr>
-                  <th>when</th><th>effect</th><th>principal</th><th>action</th>
-                  <th>resource</th><th>labels</th><th>policy</th>
-                  <th className="right">redactions</th>
+                  <th>when</th><th>decided</th><th>happened</th><th>principal</th>
+                  <th>action</th><th>resource</th><th>labels</th><th>policy</th>
                 </tr>
               </thead>
               <tbody>
@@ -57,6 +73,7 @@ export function Decisions({
                   <tr key={decision.id} className="clickable" onClick={() => onOpen(decision.id)}>
                     <td className="small dim">{when(decision.created_at)}</td>
                     <td><EffectPill effect={decision.effect} /></td>
+                    <td><OutcomePill outcome={decision.outcome} /></td>
                     <td className="mono">{decision.principal_id}</td>
                     <td className="mono">{decision.action}</td>
                     <td className="mono small">{decision.resource_urn || "—"}</td>
@@ -71,7 +88,6 @@ export function Decisions({
                       )}
                     </td>
                     <td className="mono small">{decision.determining_policy ?? "—"}</td>
-                    <td className="right">{decision.redaction_count || ""}</td>
                   </tr>
                 ))}
               </tbody>
@@ -102,9 +118,24 @@ function DecisionDetail({ id, onBack }: { id: string; onBack: () => void }) {
           <div className="card">
             <div className="row">
               <EffectPill effect={decision.data.effect} />
+              <OutcomePill outcome={decision.data.outcome} />
               <strong>{decision.data.determining_policy ?? "no policy matched"}</strong>
               <span className="small dim">{decision.data.latency_ms.toFixed(1)} ms</span>
             </div>
+            {decision.data.effect === "allow" && decision.data.outcome === "refused" && (
+              <Banner kind="error">
+                Permitted by policy, and refused by the enforcement point:{" "}
+                {decision.data.outcome_reason}
+              </Banner>
+            )}
+            {decision.data.undischarged.length > 0 && (
+              <p className="small dim">
+                went undischarged:{" "}
+                {decision.data.undischarged.map((o) => (
+                  <span key={o} className="tag critical">{o}</span>
+                ))}
+              </p>
+            )}
             <p className="dim">{decision.data.reason}</p>
 
             <table>

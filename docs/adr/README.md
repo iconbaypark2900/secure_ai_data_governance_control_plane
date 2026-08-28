@@ -20,3 +20,4 @@ costs — the last part being the one that is never reconstructible afterwards.
 | [0012](0012-streaming-governance.md) | Govern streamed answers behind a hold-back window |
 | [0013](0013-routing-is-a-policy-outcome.md) | Make routing an obligation, and models catalog assets |
 | [0014](0014-audit-streams-and-checkpoints.md) | Split the audit log into many chains, and checkpoint the set |
+| [0015](0015-enforcement-points-report-outcomes.md) | Make enforcement points report what they actually did |

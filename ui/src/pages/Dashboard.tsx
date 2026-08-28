@@ -34,6 +34,11 @@ export function Dashboard({ onOpenDecision }: { onOpenDecision: (id: string) => 
           hint="values rewritten before delivery"
         />
         <Stat
+          label="Not enforced"
+          value={stats.data?.permitted_but_not_enforced ?? 0}
+          hint="permitted, then refused downstream"
+        />
+        <Stat
           label="Median latency"
           value={stats.data ? `${stats.data.avg_latency_ms.toFixed(1)} ms` : "—"}
           hint="mean, end to end"

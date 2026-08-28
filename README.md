@@ -122,7 +122,7 @@ two is what a redaction obligation is for.
 
 ---
 
-## The eight things it does
+## The nine things it does
 
 ### 1. Knows what the data is
 
@@ -316,7 +316,41 @@ approval survives unspent for when that prohibition is lifted.
 Without those four properties, "approve this one export" quietly becomes
 "approve anything, for anyone holding the id".
 
-### 8. Proves it afterwards
+### 8. Knows whether it actually happened
+
+A decision record says what was **permitted**. On its own it does not say what
+**happened** — an enforcement point that could not discharge an obligation, or
+refused for its own reasons, leaves a row reading `allow` behind an action that
+never took place.
+
+So enforcement points report back:
+
+```bash
+GET /v1/decisions?outcome=refused      # permitted, then refused downstream
+GET /v1/decisions?outcome=unreported   # nobody has accounted for these at all
+```
+
+Three outcomes, and the third is the one that earns its place: `enforced`,
+`refused`, and **`partial`** — the action happened but a duty went undischarged.
+Without it, a point that carried out three obligations and skipped the fourth has
+to report something false either way, and the useful signal disappears.
+
+**Unreported is a state, not a default.** Silence is not read as success: a point
+that quietly stops reporting is one that quietly stopped being observed.
+
+The SDK does it for you, and does it at the right moment:
+
+```python
+async with client.enforcing(decision, can_satisfy={"watermark"}) as payload:
+    await send_upstream(payload)
+# reported enforced here — or refused, if the block raised
+```
+
+Reporting when the obligations merely check out is premature; if a later step
+fails, the record says `enforced` behind something that never happened. That was
+a real bug, caught by running it.
+
+### 9. Proves it afterwards
 
 Every decision and every policy change is sealed into a hash chain. Each record's
 digest is an **HMAC** over its own content *and* its predecessor's digest.
@@ -570,7 +604,7 @@ pep/reverse_proxy/  the reference enforcement point
 ui/                 the admin console (React + TypeScript)
 seed/               the reference policy set and catalog
 migrations/         Alembic, including the append-only trigger
-tests/              594 tests
+tests/              617 tests
 docs/               architecture, the policy language, and the decision records
 ```
 
@@ -627,7 +661,7 @@ string of each denial.
 ## Testing
 
 ```bash
-make test      # 546 tests on SQLite, no external dependencies
+make test      # 590 tests on SQLite, no external dependencies
 make test-pg   # + 7 that need real Postgres
 make check     # ruff, mypy, and the suite — everything CI runs
 ```

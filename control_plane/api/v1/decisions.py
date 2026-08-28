@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 
-from control_plane.api.deps import CallerDep, PDPDep, PolicyStoreDep, SessionDep, require_scope
+from control_plane.api.deps import (
+    AuditDep,
+    CallerDep,
+    PDPDep,
+    PolicyStoreDep,
+    SessionDep,
+    require_scope,
+)
+from control_plane.audit.chain import AuditEvent
 from control_plane.auth.keys import Scope
 from control_plane.classification.scanner import Scanner
 from control_plane.models.decision import DecisionRecord
@@ -20,6 +29,8 @@ from control_plane.schemas.decision import (
     DecideRequest,
     DecideResponse,
     FindingOut,
+    OutcomeOut,
+    OutcomeReport,
     SimulateRequest,
     SimulateResponse,
 )
@@ -33,7 +44,9 @@ router = APIRouter(tags=["decisions"])
     summary="Decide whether an action on data is permitted",
     dependencies=[Depends(require_scope(Scope.DECIDE))],
 )
-async def decide(request: DecideRequest, pdp: PDPDep, caller: CallerDep) -> DecideResponse:
+async def decide(
+    request: DecideRequest, pdp: PDPDep, session: SessionDep, caller: CallerDep
+) -> DecideResponse:
     """Evaluate one access request.
 
     This is the only endpoint an enforcement point needs. It resolves the
@@ -48,7 +61,17 @@ async def decide(request: DecideRequest, pdp: PDPDep, caller: CallerDep) -> Deci
                 f"this API key may not submit decisions for principal {request.principal.id!r}"
             ),
         )
-    return await pdp.decide(request, actor=caller.identity)
+    response = await pdp.decide(request, actor=caller.identity)
+
+    # Commit before answering. The session dependency also commits, but its
+    # teardown can run *after* the response has gone out -- so a caller that
+    # takes the decision_id and immediately reports an outcome, redeems an
+    # approval, or fetches the decision can arrive before the row exists. That
+    # race was real and intermittent, around one attempt in eight. An identifier
+    # handed to a caller has to refer to something that exists.
+    if response.decision_id is not None:
+        await session.commit()
+    return response
 
 
 @router.post(
@@ -148,6 +171,13 @@ async def list_decisions(
     principal_id: Annotated[str | None, Query()] = None,
     resource_urn: Annotated[str | None, Query()] = None,
     policy: Annotated[str | None, Query(description="Filter by determining policy")] = None,
+    outcome: Annotated[
+        str | None,
+        Query(
+            description="enforced, refused, partial, or 'unreported' for decisions "
+            "no enforcement point has accounted for."
+        ),
+    ] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict[str, Any]:
@@ -160,6 +190,12 @@ async def list_decisions(
         statement = statement.where(DecisionRecord.resource_urn == resource_urn)
     if policy:
         statement = statement.where(DecisionRecord.determining_policy == policy)
+    if outcome == "unreported":
+        # The most interesting filter: a point that quietly stops reporting is a
+        # point that quietly stopped being observed.
+        statement = statement.where(DecisionRecord.outcome.is_(None))
+    elif outcome:
+        statement = statement.where(DecisionRecord.outcome == outcome)
 
     total = (
         await session.execute(select(func.count()).select_from(statement.subquery()))
@@ -203,13 +239,118 @@ async def decision_stats(session: SessionDep) -> dict[str, Any]:
             )
         )
     ).one()
+    by_outcome = (
+        await session.execute(
+            select(DecisionRecord.outcome, func.count()).group_by(DecisionRecord.outcome)
+        )
+    ).all()
+    # "Permitted, then refused downstream" -- the reconciliation that was not
+    # answerable before enforcement points reported back.
+    permitted_not_enforced = (
+        await session.execute(
+            select(func.count(DecisionRecord.id)).where(
+                DecisionRecord.effect == "allow",
+                DecisionRecord.outcome.in_(("refused", "partial")),
+            )
+        )
+    ).scalar_one()
+
     return {
         "total": int(totals[0]),
         "avg_latency_ms": round(float(totals[1]), 3),
         "total_redactions": int(totals[2]),
         "by_effect": {effect: int(count) for effect, count in by_effect},
+        "by_outcome": {(o or "unreported"): int(c) for o, c in by_outcome},
+        "permitted_but_not_enforced": int(permitted_not_enforced),
         "by_policy": [{"policy": key, "count": int(count)} for key, count in by_policy],
     }
+
+
+@router.post(
+    "/decisions/{decision_id}/outcome",
+    response_model=OutcomeOut,
+    summary="Report what the enforcement point actually did",
+    dependencies=[Depends(require_scope(Scope.DECIDE))],
+)
+async def report_outcome(
+    decision_id: uuid.UUID,
+    body: OutcomeReport,
+    session: SessionDep,
+    audit: AuditDep,
+    caller: CallerDep,
+) -> OutcomeOut:
+    """Close the loop between what was permitted and what happened.
+
+    Everything else in this API records a *decision*. Without this, an
+    enforcement point that could not discharge an obligation -- or refused for
+    its own reasons -- leaves a record reading "allow" behind an action that
+    never took place, and an auditor reconciling the two has one side of the
+    ledger.
+
+    An outcome is written once. A repeat of the same report is idempotent, so a
+    retrying caller is not punished for it. A *different* one is refused and
+    sealed into the audit chain as a conflict: an attempt to restate what
+    already happened is precisely the thing a tamper-evident log exists to
+    surface.
+    """
+    record = (
+        await session.execute(select(DecisionRecord).where(DecisionRecord.id == decision_id))
+    ).scalar_one_or_none()
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"no decision {decision_id}")
+
+    if record.outcome is not None:
+        if record.outcome == str(body.outcome):
+            return _outcome_out(record)
+        await audit.append(
+            AuditEvent.DECISION_OUTCOME_CONFLICT,
+            actor=caller.identity,
+            subject=str(decision_id),
+            payload={
+                "recorded": record.outcome,
+                "submitted": str(body.outcome),
+                "recorded_by": record.outcome_reported_by,
+                "reason": body.reason,
+            },
+        )
+        # Commit before refusing. The request handler raises from here, and the
+        # session dependency rolls back on an exception -- which would discard
+        # the very record this branch exists to write. Nothing else is pending:
+        # the decision row was only read, so this commits the audit entry alone.
+        await session.commit()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"this decision was already reported as {record.outcome!r} by "
+                f"{record.outcome_reported_by or 'an unrecorded caller'}; a "
+                f"conflicting report has been recorded in the audit chain"
+            ),
+        )
+
+    record.outcome = str(body.outcome)
+    record.outcome_reason = body.reason
+    record.outcome_reported_at = datetime.now(UTC)
+    record.outcome_reported_by = caller.identity
+    record.discharged = sorted(set(body.discharged))
+    record.undischarged = sorted(set(body.undischarged))
+    await session.flush()
+
+    await audit.append(
+        AuditEvent.DECISION_OUTCOME,
+        actor=caller.identity,
+        subject=str(decision_id),
+        payload={
+            "outcome": record.outcome,
+            "effect": record.effect,
+            "reason": body.reason,
+            "discharged": record.discharged,
+            "undischarged": record.undischarged,
+            # Both halves in one record, so the reconciliation an auditor wants
+            # does not require joining two tables to notice a contradiction.
+            "permitted": record.effect == "allow",
+        },
+    )
+    return _outcome_out(record)
 
 
 @router.get(
@@ -224,6 +365,20 @@ async def get_decision(decision_id: uuid.UUID, session: SessionDep) -> dict[str,
     if record is None:
         raise HTTPException(status_code=404, detail=f"no decision {decision_id}")
     return {**_decision_summary(record), "trace": record.trace, "context": record.context}
+
+
+def _outcome_out(record: DecisionRecord) -> OutcomeOut:
+    return OutcomeOut(
+        decision_id=record.id,
+        outcome=record.outcome,
+        reason=record.outcome_reason,
+        discharged=list(record.discharged or []),
+        undischarged=list(record.undischarged or []),
+        reported_at=(
+            record.outcome_reported_at.isoformat() if record.outcome_reported_at else None
+        ),
+        reported_by=record.outcome_reported_by,
+    )
 
 
 def _decision_summary(record: DecisionRecord) -> dict[str, Any]:
@@ -244,4 +399,11 @@ def _decision_summary(record: DecisionRecord) -> dict[str, Any]:
         "redaction_count": record.redaction_count,
         "latency_ms": record.latency_ms,
         "correlation_id": record.correlation_id,
+        "outcome": record.outcome,
+        "outcome_reason": record.outcome_reason,
+        "discharged": list(record.discharged or []),
+        "undischarged": list(record.undischarged or []),
+        "outcome_reported_at": (
+            record.outcome_reported_at.isoformat() if record.outcome_reported_at else None
+        ),
     }

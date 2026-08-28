@@ -15,9 +15,7 @@ and honour the answer.
         resource_urn="qdrant://kb_docs",
         payload=retrieved_chunk,
     )
-    if not decision.allowed:
-        raise DecisionDenied(decision)
-    safe_chunk = decision.payload   # obligations already applied
+    safe_chunk = await client.enforce(decision)   # acts, and reports what it did
 
 When a policy parks the request for a human, wait and re-send it unchanged:
 
@@ -35,6 +33,7 @@ from control_plane_sdk.client import (
     Decision,
     DecisionDenied,
     ObligationUnsatisfied,
+    Outcome,
 )
 
 __all__ = [
@@ -46,6 +45,7 @@ __all__ = [
     "Decision",
     "DecisionDenied",
     "ObligationUnsatisfied",
+    "Outcome",
 ]
 
 __version__ = "0.1.0"

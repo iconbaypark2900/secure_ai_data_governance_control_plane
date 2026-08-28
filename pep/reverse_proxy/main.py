@@ -168,6 +168,21 @@ def _replace_messages_text(messages: list[dict[str, Any]], governed: str) -> lis
     return rebuilt
 
 
+class _Refused(Exception):
+    """This proxy will not proceed, for a reason worth reporting.
+
+    Raised rather than returned so the outcome reporting happens in one place:
+    a refusal that returns early is a refusal somebody has to remember to
+    report, and that is how a record ends up saying "allow" behind an action
+    that never took place.
+    """
+
+    def __init__(self, reason: str, undischarged: list[str]) -> None:
+        self.reason = reason
+        self.undischarged = undischarged
+        super().__init__(reason)
+
+
 def _select_backend(obligations: list[dict[str, Any]]) -> tuple[Backend, str | None]:
     """The endpoint to use, or a refusal reason.
 
@@ -245,28 +260,37 @@ async def chat_completions(
     )
     if not inbound.allowed:
         return _denied(inbound, "inbound")
+    # Everything that can still refuse happens before anything is reported.
+    # Declaring what this proxy can discharge is not a formality: a duty not
+    # named here turns the allow into a refusal, which is the correct outcome
+    # for one nobody is going to carry out.
     try:
-        # Declaring what this proxy can discharge is not a formality: anything
-        # not named here turns the allow into a refusal, which is the correct
-        # outcome for a duty nobody is going to carry out.
         governed_prompt = inbound.enforce(can_satisfy=SATISFIABLE)
+
+        purpose_error = check_purpose(inbound.obligations, str(context["purpose"]))
+        if purpose_error is not None:
+            raise _Refused(purpose_error, ["require_purpose"])
+
+        upstream_body = dict(body)
+        if governed_prompt is not None and governed_prompt != prompt:
+            upstream_body["messages"] = _replace_messages_text(messages, governed_prompt)
+        upstream_body, request_notes = apply_request_obligations(
+            upstream_body, list(inbound.obligations)
+        )
+
+        backend, backend_error = _select_backend(list(inbound.obligations))
+        if backend_error is not None:
+            raise _Refused(backend_error, ["route"])
     except ObligationUnsatisfied as exc:
+        await _control_plane.report_outcome(
+            inbound, "refused", reason=str(exc), undischarged=exc.obligations
+        )
         return _denied(Decision.denial(str(exc)), "inbound")
-
-    purpose_error = check_purpose(inbound.obligations, str(context["purpose"]))
-    if purpose_error is not None:
-        return _denied(Decision.denial(purpose_error), "inbound")
-
-    upstream_body = dict(body)
-    if governed_prompt is not None and governed_prompt != prompt:
-        upstream_body["messages"] = _replace_messages_text(messages, governed_prompt)
-    upstream_body, request_notes = apply_request_obligations(
-        upstream_body, list(inbound.obligations)
-    )
-
-    backend, backend_error = _select_backend(list(inbound.obligations))
-    if backend_error is not None:
-        return _denied(Decision.denial(backend_error), "inbound")
+    except _Refused as exc:
+        await _control_plane.report_outcome(
+            inbound, "refused", reason=exc.reason, undischarged=exc.undischarged
+        )
+        return _denied(Decision.denial(exc.reason), "inbound")
     if backend.model:
         # The logical model the caller named is not necessarily what the chosen
         # backend calls itself.
@@ -284,27 +308,30 @@ async def chat_completions(
                 principal_type=x_principal_type or "service",
                 context=context,
                 correlation_id=correlation_id,
-                inbound_obligations=list(inbound.obligations),
+                inbound=inbound,
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
         )
 
     # --- call the model ---------------------------------------------------- #
+    #
+    # Inside `enforcing`, so the inbound decision is reported enforced once the
+    # request has actually gone upstream -- and reported refused if it did not.
+    # Reporting when the obligations merely checked out would leave a record
+    # saying "enforced" behind a call that never happened.
     started = time.perf_counter()
-    if UPSTREAM_MODE == "echo":
-        completion = _echo_completion(upstream_body, model)
-    else:
-        upstream_response = await _upstream.post(
-            f"{backend.base_url}/v1/chat/completions",
-            json=upstream_body,
-            headers=backend.headers(),
-        )
-        if upstream_response.status_code >= 400:
-            return JSONResponse(
-                status_code=upstream_response.status_code, content=upstream_response.json()
+    async with _control_plane.enforcing(inbound, can_satisfy=SATISFIABLE):
+        if UPSTREAM_MODE == "echo":
+            completion = _echo_completion(upstream_body, model)
+        else:
+            upstream_response = await _upstream.post(
+                f"{backend.base_url}/v1/chat/completions",
+                json=upstream_body,
+                headers=backend.headers(),
             )
-        completion = upstream_response.json()
+            upstream_response.raise_for_status()
+            completion = upstream_response.json()
     upstream_ms = round((time.perf_counter() - started) * 1000, 2)
 
     # --- outbound: may this answer reach the caller? ------------------------ #
@@ -322,7 +349,7 @@ async def chat_completions(
     if not outbound.allowed:
         return _denied(outbound, "outbound")
     try:
-        governed_answer = outbound.enforce(can_satisfy=SATISFIABLE)
+        governed_answer = await _control_plane.enforce(outbound, can_satisfy=SATISFIABLE)
     except ObligationUnsatisfied as exc:
         return _denied(Decision.denial(str(exc)), "outbound")
     if governed_answer is not None and governed_answer != answer:
@@ -375,7 +402,7 @@ async def _stream(
     principal_type: str,
     context: dict[str, Any],
     correlation_id: str,
-    inbound_obligations: list[dict[str, Any]],
+    inbound: Decision,
 ) -> AsyncIterator[bytes]:
     """Govern a streamed completion on its way back.
 
@@ -399,7 +426,7 @@ async def _stream(
         if not decision.allowed:
             return span, decision.reason
         try:
-            governed = decision.enforce(can_satisfy=SATISFIABLE)
+            governed = await _control_plane.enforce(decision, can_satisfy=SATISFIABLE)
         except ObligationUnsatisfied as exc:
             return span, str(exc)
         return (governed if isinstance(governed, str) else span), None
@@ -421,18 +448,36 @@ async def _stream(
             }
         }
 
-    if STREAM_MODE == "buffer":
-        async for frame in _stream_buffered(upstream_body, governor, refusal_event):
-            yield frame
-        return
-
+    # A streamed answer is not finished when the handler returns -- it is
+    # finished when the last frame goes out. So the outcome is reported from
+    # here rather than around the handler, where it would land while the stream
+    # was still running.
+    refused: str | None = None
     try:
-        async with _upstream_frames(upstream_body, model, backend) as frames:
-            async for frame in govern_stream(frames, governor, on_refusal=refusal_event):
+        if STREAM_MODE == "buffer":
+            async for frame in _stream_buffered(upstream_body, governor, refusal_event):
                 yield frame
+        else:
+            async with _upstream_frames(upstream_body, model, backend) as frames:
+                async for frame in govern_stream(frames, governor, on_refusal=refusal_event):
+                    yield frame
+        refused = governor.refused_reason
     except httpx.HTTPError as exc:
-        yield sse(refusal_event(f"the model provider could not be reached: {exc}"))
+        refused = f"the model provider could not be reached: {exc}"
+        yield sse(refusal_event(refused))
         yield sse(DONE)
+
+    if refused is None:
+        await _control_plane.report_outcome(
+            inbound, "enforced", discharged=inbound.obligation_types()
+        )
+    else:
+        await _control_plane.report_outcome(
+            inbound,
+            "refused",
+            reason=refused,
+            undischarged=inbound.obligation_types(),
+        )
 
 
 @asynccontextmanager

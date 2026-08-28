@@ -148,6 +148,9 @@ class StreamGovernor:
     _governed_at: int = 0
     _emitted: str = ""
     _refused: bool = False
+    #: Kept so the caller can report the outcome: a stream that ended in a
+    #: refusal did not deliver the answer, and the record should say so.
+    refused_reason: str | None = field(default=None, init=False)
     decisions: int = 0
     held_back_at_end: int = field(default=0, init=False)
     #: Set if governance ever rewrote text that had already been sent, which can
@@ -193,6 +196,7 @@ class StreamGovernor:
 
         if refusal is not None:
             self._refused = True
+            self.refused_reason = refusal
             # Nothing further is sent. What already went out is behind the
             # window, so it cannot contain the value being refused.
             return GovernedChunk(refusal=refusal)
@@ -203,6 +207,7 @@ class StreamGovernor:
             # splicing inconsistent text on top would only obscure that.
             self._refused = True
             self.overran_window = True
+            self.refused_reason = "a value longer than the streaming window was found"
             return GovernedChunk(
                 refusal=(
                     "a sensitive value longer than the streaming window was found "

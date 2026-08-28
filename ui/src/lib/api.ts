@@ -190,6 +190,12 @@ export interface DecisionSummary {
   obligations: Record<string, unknown>[]; classifications: string[];
   finding_count: number; redaction_count: number; latency_ms: number;
   correlation_id: string | null;
+  /** What the enforcement point did. Null means unreported — its own finding. */
+  outcome: "enforced" | "refused" | "partial" | null;
+  outcome_reason: string;
+  discharged: string[];
+  undischarged: string[];
+  outcome_reported_at: string | null;
 }
 
 export interface RoutingInfo {
@@ -214,6 +220,9 @@ export interface TraceEntry {
 export interface DecisionStats {
   total: number; avg_latency_ms: number; total_redactions: number;
   by_effect: Record<string, number>;
+  by_outcome: Record<string, number>;
+  /** Permitted by policy, then not carried out downstream. */
+  permitted_but_not_enforced: number;
   by_policy: { policy: string; count: number }[];
 }
 

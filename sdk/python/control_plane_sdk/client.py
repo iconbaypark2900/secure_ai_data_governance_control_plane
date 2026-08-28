@@ -20,7 +20,8 @@ authorisation question -- are eligible.
 from __future__ import annotations
 
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal, Self
 
@@ -35,6 +36,7 @@ __all__ = [
     "Decision",
     "DecisionDenied",
     "ObligationUnsatisfied",
+    "Outcome",
 ]
 
 #: Approval states from which nothing further will change on its own.
@@ -45,6 +47,14 @@ DEFAULT_RETRIES = 2
 #: Obligations this client can satisfy on the caller's behalf, because the
 #: control plane already applied them to the returned payload.
 SATISFIED_BY_CONTROL_PLANE = frozenset({"redact", "annotate", "log", "ttl"})
+
+
+class Outcome:
+    """What actually happened to a decision."""
+
+    ENFORCED = "enforced"
+    REFUSED = "refused"
+    PARTIAL = "partial"
 
 
 class ControlPlaneError(Exception):
@@ -151,23 +161,28 @@ class Decision:
     def denial(cls, reason: str) -> Decision:
         return cls(effect="deny", reason=reason)
 
+    def obligation_types(self) -> list[str]:
+        return sorted({str(o.get("type")) for o in self.obligations if o.get("type")})
+
+    def outstanding(self, can_satisfy: Iterable[str] = ()) -> list[str]:
+        """Obligation types nobody in this exchange is going to carry out."""
+        satisfiable = SATISFIED_BY_CONTROL_PLANE | {str(item) for item in can_satisfy}
+        return sorted(t for t in self.obligation_types() if t not in satisfiable)
+
     def enforce(self, *, can_satisfy: Iterable[str] = ()) -> Any:
         """Return the payload, or raise if the action must not proceed.
 
         ``can_satisfy`` names obligation types this enforcement point implements
         itself. Anything the control plane did not already apply, and that is not
         named here, turns the allow into a refusal.
+
+        Pure: it decides, it does not report. Use the client's ``enforce`` to
+        have the outcome reported as well, which is what makes the control
+        plane's record match what happened.
         """
         if not self.allowed:
             raise DecisionDenied(self)
-        satisfiable = SATISFIED_BY_CONTROL_PLANE | {str(item) for item in can_satisfy}
-        outstanding = sorted(
-            {
-                str(obligation.get("type"))
-                for obligation in self.obligations
-                if str(obligation.get("type")) not in satisfiable
-            }
-        )
+        outstanding = self.outstanding(can_satisfy)
         if outstanding:
             raise ObligationUnsatisfied(self, outstanding)
         return self.payload
@@ -423,6 +438,123 @@ class AsyncControlPlaneClient(_ClientBase):
         )
         response.raise_for_status()
         return dict(response.json())
+
+    async def report_outcome(
+        self,
+        decision: Decision,
+        outcome: str,
+        *,
+        reason: str = "",
+        discharged: Iterable[str] = (),
+        undischarged: Iterable[str] = (),
+    ) -> bool:
+        """Tell the control plane what actually happened.
+
+        Never raises. By the time this is called the action has already been
+        taken or refused, and failing the caller over a bookkeeping round trip
+        would turn a reporting problem into an outage. An outcome that does not
+        arrive shows up server-side as *unreported*, which is the detection path
+        -- silence is treated as "nothing is known", not as "it went fine".
+        """
+        if not decision.decision_id:
+            return False
+        try:
+            response = await self._http().post(
+                f"/v1/decisions/{decision.decision_id}/outcome",
+                json={
+                    "outcome": outcome,
+                    "reason": reason,
+                    "discharged": sorted(set(discharged)),
+                    "undischarged": sorted(set(undischarged)),
+                },
+                headers=self._headers,
+            )
+            return response.status_code < 300
+        except (httpx.TimeoutException, httpx.TransportError):
+            return False
+
+    @asynccontextmanager
+    async def enforcing(
+        self, decision: Decision, *, can_satisfy: Iterable[str] = ()
+    ) -> AsyncIterator[Any]:
+        """Act on a decision, and report the outcome when the work is done.
+
+        The right shape whenever anything happens *after* the obligation check --
+        a backend call, a downstream hop, a second decision. Reporting at the
+        moment the obligations merely check out is premature: the action has not
+        happened yet, and if a later step fails the record ends up saying
+        "enforced" behind something that never took place. That is exactly the
+        failure this reporting exists to prevent::
+
+            async with client.enforcing(decision, can_satisfy={"watermark"}) as payload:
+                await send_upstream(payload)
+            # reported enforced here, or refused if the block raised
+
+        An exception escaping the block is reported as a refusal, because from
+        the control plane's side that is what it is: permitted, and it did not
+        happen.
+        """
+        payload = decision.enforce(can_satisfy=can_satisfy)
+        try:
+            yield payload
+        except Exception as exc:
+            await self.report_outcome(
+                decision,
+                Outcome.REFUSED,
+                reason=str(exc) or exc.__class__.__name__,
+                discharged=[],
+                undischarged=decision.obligation_types(),
+            )
+            raise
+        await self.report_outcome(
+            decision, Outcome.ENFORCED, discharged=decision.obligation_types()
+        )
+
+    async def enforce(self, decision: Decision, *, can_satisfy: Iterable[str] = ()) -> Any:
+        """Act on a decision and report it enforced, in one call.
+
+        Correct only when acting on the decision is the *last* thing that
+        happens. If anything can still fail afterwards, use :meth:`enforcing`:
+        this reports success as soon as the obligations check out, and a later
+        failure would leave a record saying "enforced" behind an action that
+        never took place.
+        """
+        try:
+            payload = decision.enforce(can_satisfy=can_satisfy)
+        except ObligationUnsatisfied as exc:
+            await self.report_outcome(
+                decision,
+                Outcome.REFUSED,
+                reason=str(exc),
+                discharged=[t for t in decision.obligation_types() if t not in exc.obligations],
+                undischarged=exc.obligations,
+            )
+            raise
+        except DecisionDenied:
+            # Nothing to report: the record already says it was refused, and the
+            # enforcement point never had an action to take.
+            raise
+        await self.report_outcome(
+            decision, Outcome.ENFORCED, discharged=decision.obligation_types()
+        )
+        return payload
+
+    async def report_partial(
+        self, decision: Decision, *, undischarged: Iterable[str], reason: str
+    ) -> bool:
+        """Report that the action happened but a duty went undischarged.
+
+        The honest outcome when an enforcement point proceeds anyway. Reporting
+        ``enforced`` here would hide the very thing worth knowing.
+        """
+        missing = sorted(set(undischarged))
+        return await self.report_outcome(
+            decision,
+            Outcome.PARTIAL,
+            reason=reason,
+            discharged=[t for t in decision.obligation_types() if t not in missing],
+            undischarged=missing,
+        )
 
     async def get_approval(self, approval_id: str) -> dict[str, Any]:
         """Read the current state of a parked decision."""

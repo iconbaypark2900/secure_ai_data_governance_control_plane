@@ -31,6 +31,8 @@ class DecisionRecord(Base, UUIDPrimaryKey, TimestampMixin):
         Index("ix_decisions_principal_created", "principal_id", "created_at"),
         Index("ix_decisions_effect_created", "effect", "created_at"),
         Index("ix_decisions_resource", "resource_urn"),
+        # "permitted, then refused downstream" should be a query, not a guess.
+        Index("ix_decisions_effect_outcome", "effect", "outcome"),
     )
 
     principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -58,9 +60,38 @@ class DecisionRecord(Base, UUIDPrimaryKey, TimestampMixin):
     #: Correlates a decision with the caller's own request/trace id.
     correlation_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
 
+    # --- what the enforcement point actually did --------------------------- #
+    #
+    # A decision record without this says what was *permitted*. It does not say
+    # what *happened*: an enforcement point that could not discharge an
+    # obligation, or refused for its own reasons, leaves a row reading "allow"
+    # behind an action that never took place. Reconciling the two is the whole
+    # point of having the log.
+    #
+    # Null means unreported, which is its own finding -- a point that quietly
+    # stops reporting is a point that quietly stopped being observed.
+    #: enforced | refused | partial
+    outcome: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    outcome_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    outcome_reported_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
+    outcome_reported_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    #: Obligation types the enforcement point says it carried out.
+    discharged: Mapped[list[str]] = mapped_column(nullable=False, default=list)
+    #: Obligation types it did not, which is what makes "partial" legible.
+    undischarged: Mapped[list[str]] = mapped_column(nullable=False, default=list)
+
     approval: Mapped[ApprovalRequest | None] = relationship(
         back_populates="decision", uselist=False, cascade="all, delete-orphan"
     )
+
+    @property
+    def reported(self) -> bool:
+        return self.outcome is not None
+
+    @property
+    def took_effect(self) -> bool:
+        """Whether the permitted action actually happened, as far as we know."""
+        return self.outcome == "enforced"
 
 
 class ApprovalRequest(Base, UUIDPrimaryKey, TimestampMixin):

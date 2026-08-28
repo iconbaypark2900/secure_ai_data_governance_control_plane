@@ -8,6 +8,26 @@ export function EffectPill({ effect }: { effect: Effect | string }) {
   return <span className={`pill ${effect}`}>{text}</span>;
 }
 
+/**
+ * What actually happened, as distinct from what was permitted.
+ *
+ * Unreported is shown rather than hidden: an enforcement point that quietly
+ * stops reporting is one that quietly stopped being observed, and treating
+ * silence as success is the assumption this whole field exists to remove.
+ */
+export function OutcomePill({ outcome }: { outcome: string | null }) {
+  if (outcome === null) {
+    return (
+      <span className="pill neutral" title="No enforcement point has accounted for this">
+        unreported
+      </span>
+    );
+  }
+  const style =
+    outcome === "enforced" ? "allow" : outcome === "partial" ? "require_approval" : "deny";
+  return <span className={`pill ${style}`}>{outcome}</span>;
+}
+
 export function Stat({ label, value, hint }: { label: string; value: ReactNode; hint?: string }) {
   return (
     <div className="card stat">

@@ -56,6 +56,8 @@ class AuditEvent(StrEnum):
     """The event types the control plane records."""
 
     DECISION = "decision"
+    DECISION_OUTCOME = "decision.outcome"
+    DECISION_OUTCOME_CONFLICT = "decision.outcome_conflict"
     POLICY_CREATED = "policy.created"
     POLICY_UPDATED = "policy.updated"
     POLICY_DELETED = "policy.deleted"
