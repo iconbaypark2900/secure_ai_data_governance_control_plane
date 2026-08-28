@@ -1,0 +1,102 @@
+# A complete, self-contained deployment: control plane, database, and the
+# reference enforcement point in front of a stand-in model.
+#
+#   docker compose up --build
+#   docker compose exec control-plane cpctl seed
+#
+# Then send a prompt through the governed proxy on :8100 and watch it get
+# scrubbed on the way past.
+
+name: ai-governance-control-plane
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: control_plane
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-control_plane}
+      POSTGRES_DB: control_plane
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U control_plane -d control_plane"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    # Not published by default. The database is reachable from the compose
+    # network and nowhere else; uncomment to attach a client from the host.
+    # ports:
+    #   - "5432:5432"
+
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      CP_DATABASE_URL: postgresql+asyncpg://control_plane:${POSTGRES_PASSWORD:-control_plane}@postgres:5432/control_plane
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  control-plane:
+    build: .
+    environment:
+      CP_ENVIRONMENT: ${CP_ENVIRONMENT:-local}
+      CP_DATABASE_URL: postgresql+asyncpg://control_plane:${POSTGRES_PASSWORD:-control_plane}@postgres:5432/control_plane
+      # Both keys must be set explicitly, and must survive restarts: rotating
+      # the audit key invalidates every digest already written.
+      CP_AUDIT_HMAC_KEY: ${CP_AUDIT_HMAC_KEY:?set CP_AUDIT_HMAC_KEY in .env}
+      CP_REDACTION_HMAC_KEY: ${CP_REDACTION_HMAC_KEY:?set CP_REDACTION_HMAC_KEY in .env}
+      CP_BOOTSTRAP_ADMIN_KEY: ${CP_BOOTSTRAP_ADMIN_KEY:-}
+      CP_DEFAULT_EFFECT: ${CP_DEFAULT_EFFECT:-deny}
+      CP_AUTH_DISABLED: ${CP_AUTH_DISABLED:-false}
+      CP_CORS_ORIGINS: ${CP_CORS_ORIGINS:-http://localhost:5173,http://localhost:8000}
+      CP_LOG_JSON: ${CP_LOG_JSON:-true}
+    ports:
+      - "${CP_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/v1/health || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  # The reference enforcement point. Point an OpenAI-compatible client at
+  # http://localhost:8100/v1 and every prompt is governed on the way through.
+  llm-proxy:
+    build: .
+    command:
+      - uvicorn
+      - pep.reverse_proxy.main:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8100"
+    environment:
+      PEP_CONTROL_PLANE_URL: http://control-plane:8000
+      PEP_CONTROL_PLANE_KEY: ${PEP_CONTROL_PLANE_KEY:-}
+      # "echo" answers locally, so the demo needs no provider account. Set
+      # "proxy" plus PEP_UPSTREAM_URL/KEY to govern real traffic.
+      PEP_UPSTREAM_MODE: ${PEP_UPSTREAM_MODE:-echo}
+      PEP_UPSTREAM_URL: ${PEP_UPSTREAM_URL:-https://api.openai.com}
+      PEP_UPSTREAM_KEY: ${PEP_UPSTREAM_KEY:-}
+      PEP_DESTINATION: ${PEP_DESTINATION:-external}
+      PEP_FAIL_CLOSED: ${PEP_FAIL_CLOSED:-true}
+    ports:
+      - "${PEP_PORT:-8100}:8100"
+    depends_on:
+      control-plane:
+        condition: service_started
+    volumes:
+      - ./pep:/app/pep:ro
+      - ./sdk:/app/sdk:ro
+    restart: unless-stopped
+
+volumes:
+  postgres-data:

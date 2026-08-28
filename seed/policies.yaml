@@ -1,0 +1,204 @@
+# The reference policy set.
+#
+# Read it top to bottom as a statement of posture: the highest priorities are
+# the things that must never happen, the lowest are the ordinary permissions
+# that make the system usable. Nothing here is matched by default -- the engine
+# denies when no policy applies -- so every allow below is a deliberate grant.
+#
+# Load with:  cpctl policy sync seed/policies.yaml
+
+name: reference
+description: >
+  A worked policy set for an organisation running AI over a mix of public,
+  personal, health, and payment data.
+combining_algorithm: deny_overrides
+
+policies:
+  # ----------------------------------------------------------------------- #
+  # Absolute prohibitions. Nothing outranks these.
+  # ----------------------------------------------------------------------- #
+
+  - key: deny-credentials-anywhere
+    name: Credentials never move
+    description: >
+      An API key, private key, or connection string in a payload is never an
+      acceptable thing to send onward, regardless of who is asking or where it
+      is going. This is the one rule with no exception path: there is no
+      legitimate workflow in which a model needs to receive a live credential,
+      and a leaked one is exploitable the moment it lands in a log.
+    effect: deny
+    priority: 1000
+    tags: [security, always-on]
+    match:
+      findings: {any_of: [secret]}
+
+  - key: deny-phi-to-external-models
+    name: PHI stays inside
+    description: >
+      Health data must not reach a model operated by a third party. HIPAA
+      permits disclosure to a business associate under an agreement; it does
+      not permit it as a side effect of a prompt.
+    effect: deny
+    priority: 950
+    tags: [hipaa, phi]
+    match:
+      all:
+        - resource.classifications: {any_of: [phi]}
+        - context.destination: external
+
+  - key: deny-card-numbers-to-models
+    name: Card numbers never reach a model
+    description: >
+      A PAN in a prompt drags the model provider, the prompt log, and every
+      downstream trace into PCI scope. Cheaper to refuse than to certify.
+    effect: deny
+    priority: 940
+    tags: [pci]
+    match:
+      all:
+        - findings: {any_of: [pci.card_number]}
+        - action: {in: [infer, embed, return]}
+
+  - key: deny-unreviewed-agents-on-sensitive-stores
+    name: Unreviewed agents cannot touch sensitive stores
+    description: >
+      An agent that has not been through review has no business reading the
+      customer or clinical stores, whatever else it may be permitted to do.
+      Note the selector: this is about the *store*, not about what happens to
+      be in a given payload. A reviewed low-trust agent is still allowed to
+      work here -- it just works through the redaction obligations below.
+    effect: deny
+    priority: 900
+    tags: [agents]
+    match:
+      all:
+        - principal.type: agent
+        - principal.trust_tier: {in: [untrusted, unknown]}
+        - resource.classifications: {any_of: [phi, pci, pii.ssn]}
+
+  # ----------------------------------------------------------------------- #
+  # Things a person has to agree to.
+  # ----------------------------------------------------------------------- #
+
+  - key: approve-bulk-export
+    name: Bulk export needs a named approver
+    description: >
+      Exporting a whole table of personal data is legitimate and occasionally
+      necessary. It is also what exfiltration looks like. Requiring a human
+      makes the two distinguishable after the fact.
+    effect: require_approval
+    priority: 600
+    tags: [gdpr, exfiltration]
+    match:
+      all:
+        - action: {in: [export, bulk_read, dump]}
+        - resource.classifications: {any_of: [pii, phi, pci]}
+
+  - key: approve-training-on-personal-data
+    name: Training on personal data needs review
+    description: >
+      Model training is not a use personal data was collected for. GDPR calls
+      that purpose limitation; practically, it is the difference between data
+      you can delete on request and data baked into weights you cannot.
+    effect: require_approval
+    priority: 590
+    tags: [gdpr, purpose-limitation]
+    match:
+      all:
+        - context.purpose: {in: [training, fine_tuning, distillation]}
+        - resource.classifications: {any_of: [pii, phi]}
+
+  # ----------------------------------------------------------------------- #
+  # Ordinary work, with the conditions attached that make it safe.
+  # ----------------------------------------------------------------------- #
+
+  - key: allow-agents-read-redacted
+    name: Agents read with identifiers masked
+    description: >
+      The everyday grant. An agent may read the knowledge base and reason over
+      it; it may not learn who the records are about. Masking rather than
+      dropping keeps the surrounding text coherent, so answer quality survives.
+    effect: allow
+    priority: 200
+    tags: [agents, default-grant]
+    match:
+      all:
+        - principal.type: agent
+        - action: {in: [read, embed, search, infer]}
+        - not:
+            context.destination: external
+    obligations:
+      - type: redact
+        labels: [pii.ssn, pii.passport, pii.drivers_license, pii.national_id]
+        strategy: mask
+      - type: redact
+        labels: [pii.email, pii.phone]
+        strategy: hash
+      - type: log
+        level: info
+
+  - key: allow-agents-external-inference-scrubbed
+    name: External inference on de-identified text only
+    description: >
+      Sending a prompt to a third-party model is allowed once every direct
+      identifier is gone. Hashing rather than masking the contact fields keeps
+      the same person recognisable as the same person across a conversation,
+      without disclosing who they are.
+    effect: allow
+    priority: 190
+    tags: [agents, external]
+    match:
+      all:
+        - principal.type: agent
+        - action: {in: [infer, return]}
+        - context.destination: external
+    obligations:
+      - type: redact
+        labels: [pii, pci]
+        strategy: hash
+      - type: annotate
+        note: de-identified before leaving the boundary
+
+  - key: allow-analysts-read-unredacted
+    name: Cleared analysts see the real values
+    description: >
+      Redaction has a cost: an analyst investigating a specific customer cannot
+      do it against hashes. High-trust human principals read through, and every
+      such read is recorded against their name.
+    effect: allow
+    priority: 300
+    tags: [humans]
+    match:
+      all:
+        - principal.type: user
+        - principal.trust_tier: high
+        - action: {in: [read, query, search]}
+    obligations:
+      - type: log
+        level: notice
+
+  - key: allow-public-data-freely
+    name: Public data is not governed
+    description: >
+      Applying controls to material already cleared for release trains people
+      to route around the controls. Say so explicitly instead.
+    effect: allow
+    priority: 100
+    tags: [default-grant]
+    match:
+      all:
+        - resource.classifications: {any_of: [public]}
+        # Public classification describes the store. This second condition
+        # covers the case where something sensitive ends up in it anyway.
+        - findings: {empty: true}
+
+  - key: allow-service-health-checks
+    name: Service metadata reads
+    description: Schema and health reads that touch no records.
+    effect: allow
+    priority: 90
+    tags: [operations]
+    match:
+      all:
+        - principal.type: service
+        - action: {in: [describe, health, list_schemas]}

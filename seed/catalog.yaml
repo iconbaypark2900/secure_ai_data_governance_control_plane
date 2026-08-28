@@ -1,0 +1,98 @@
+# The reference catalog.
+#
+# Note the pattern entries (those with a '*'). They classify assets nobody has
+# registered yet, which is the case that matters: the table someone created
+# last week and forgot to tell the data team about is exactly the one that leaks.
+
+assets:
+  - urn: qdrant://kb_docs
+    name: Support knowledge base
+    kind: vector_collection
+    owner: support-engineering
+    description: Chunked help-centre articles and resolved ticket threads.
+    classifications:
+      - {label: pii.email, source: scan, confidence: 0.82}
+      - {label: confidential.internal, source: manual}
+
+  - urn: pg://public.customers
+    name: Customer master
+    kind: table
+    owner: data-platform
+    description: One row per customer, including billing contact details.
+    classifications:
+      - {label: pii.email, source: manual}
+      - {label: pii.phone, source: manual}
+      - {label: pii.address, source: manual}
+      - {label: pii.ssn, source: manual}
+
+  - urn: pg://public.payments
+    name: Payment records
+    kind: table
+    owner: finance-systems
+    description: Settled transactions with tokenised instruments.
+    classifications:
+      - {label: pci.card_number, source: manual}
+      - {label: pci.iban, source: manual}
+
+  # Everything in the clinical schema is health data, registered or not.
+  - urn: pg://clinical.*
+    name: Clinical schema
+    kind: table
+    owner: clinical-informatics
+    description: >
+      Pattern registration. Any table under the clinical schema inherits PHI
+      classification without needing its own catalog entry.
+    classifications:
+      - {label: phi.mrn, source: manual}
+      - {label: phi.icd10, source: manual}
+      - {label: pii.dob, source: manual}
+
+  - urn: s3://public-datasets/*
+    name: Published datasets
+    kind: object_store
+    owner: data-platform
+    description: Material already cleared for public release.
+    classifications:
+      - {label: public.open, source: manual}
+
+  - urn: qdrant://legal_memos
+    name: Legal memoranda
+    kind: vector_collection
+    owner: legal
+    classifications:
+      - {label: confidential.legal, source: manual}
+
+principals:
+  - external_id: agent:support_bot
+    type: agent
+    display_name: Support assistant
+    description: Answers customer questions from the knowledge base.
+    attributes: {trust_tier: low, team: support, reviewed: true}
+
+  - external_id: agent:analytics_copilot
+    type: agent
+    display_name: Analytics copilot
+    description: Writes and explains queries for the data team.
+    attributes: {trust_tier: medium, team: data, reviewed: true}
+
+  - external_id: agent:unreviewed_scraper
+    type: agent
+    display_name: Unreviewed scraper
+    description: Registered but not yet through review.
+    attributes: {trust_tier: untrusted, team: unknown, reviewed: false}
+
+  - external_id: user:analyst
+    type: user
+    display_name: Data analyst
+    attributes: {trust_tier: high, team: data, clearance: pii}
+
+  - external_id: user:support_agent
+    type: user
+    display_name: Support agent
+    attributes: {trust_tier: medium, team: support}
+
+  - external_id: service:llm_gateway
+    type: service
+    display_name: LLM gateway
+    description: The governing reverse proxy in front of model providers.
+    attributes: {trust_tier: medium, managed: true}

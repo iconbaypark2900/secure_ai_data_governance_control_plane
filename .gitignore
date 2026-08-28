@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Node
+node_modules/
+ui/dist/
+*.tsbuildinfo
+
+# Environment / secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Local state
+*.sqlite
+*.sqlite3
+data/
+.DS_Store
