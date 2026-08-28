@@ -6,6 +6,7 @@ export function Dashboard({ onOpenDecision }: { onOpenDecision: (id: string) => 
   const stats = useAsync(() => api.decisionStats(), []);
   const recent = useAsync(() => api.decisions({ limit: "12" }), []);
   const chain = useAsync(() => api.verifyAudit(), []);
+  const streams = useAsync(() => api.auditStreams(), []);
   const ready = useAsync(() => api.ready(), []);
 
   return (
@@ -78,12 +79,19 @@ export function Dashboard({ onOpenDecision }: { onOpenDecision: (id: string) => 
               {chain.data.message}
             </Banner>
           )}
+          {streams.data && streams.data.count > 0 && (
+            <p className="small dim">
+              {streams.data.count} independent chain(s) ·{" "}
+              {streams.data.total_records} record(s). Each verifies alone; only the
+              checkpoint notices one going missing.
+            </p>
+          )}
           <p className="small dim">
             Each record’s digest covers its own content and its predecessor’s, so any
             edit, deletion, or reordering shows up as a specific sequence number
             rather than a vague failure.
           </p>
-          <button onClick={chain.reload}>Re-verify</button>
+          <button onClick={() => { chain.reload(); streams.reload(); }}>Re-verify</button>
         </div>
       </div>
 

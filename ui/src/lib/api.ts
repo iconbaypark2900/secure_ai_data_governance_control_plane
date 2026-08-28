@@ -77,27 +77,42 @@ export const api = {
   decision: (id: string) => request<DecisionDetail>(`/decisions/${id}`),
   decisionStats: () => request<DecisionStats>("/decisions/stats"),
 
-  decide: (body: unknown) => request<DecideResponse>("/decide", {
-    method: "POST",
-    body: JSON.stringify(body),
-  }),
   simulate: (body: unknown) => request<SimulateResponse>("/simulate", {
     method: "POST",
     body: JSON.stringify(body),
   }),
-  classify: (payload: unknown) =>
-    request<ClassifyResponse>("/classify", {
-      method: "POST",
-      body: JSON.stringify({ payload }),
-    }),
 
   audit: (params: Record<string, string> = {}) =>
     request<Page<AuditRecord>>(`/audit?${new URLSearchParams(params)}`),
-  verifyAudit: () => request<ChainVerification>("/audit/verify"),
+  verifyAudit: (stream?: string) =>
+    request<AuditVerification>(`/audit/verify${stream ? `?stream=${stream}` : ""}`),
+  auditStreams: () => request<StreamListing>("/audit/streams"),
+  checkpoint: () => request<AuditRecord>("/audit/checkpoint", { method: "POST" }),
+
+  sources: () => request<Source[]>("/catalog/sources"),
+  discover: (name: string, body: DiscoverRequest) =>
+    request<DiscoveryReport>(`/catalog/sources/${name}/discover`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  detokenize: (tokens: string[], justification: string) =>
+    request<DetokenizeResponse>("/detokenize", {
+      method: "POST",
+      body: JSON.stringify({ tokens, justification }),
+    }),
+  verifyToken: (body: VerifyTokenRequest) =>
+    request<{ matches: boolean }>("/detokenize/verify", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  keys: () => request<ApiKey[]>("/keys"),
+  revokeKey: (prefix: string) =>
+    request<{ prefix: string }>(`/keys/${prefix}`, { method: "DELETE" }),
 
   approvals: (params: Record<string, string> = {}) =>
     request<Approval[]>(`/approvals?${new URLSearchParams(params)}`),
-  approval: (id: string) => request<Approval>(`/approvals/${id}`),
   resolveApproval: (id: string, grant: boolean, note: string) =>
     request<Approval>(`/approvals/${id}/decide?grant=${grant}`, {
       method: "POST",
@@ -177,9 +192,17 @@ export interface DecisionSummary {
   correlation_id: string | null;
 }
 
+export interface RoutingInfo {
+  target: string | null; requested: string | null; original: string | null;
+  redirected: boolean; reason: string;
+  considered: string[]; rejected: Record<string, string>;
+}
+
 export interface DecisionDetail extends DecisionSummary {
   trace: { trace?: TraceEntry[]; reason?: string } | null;
   context: Record<string, unknown>;
+  /** Present when a policy constrained where the request could go. */
+  route?: RoutingInfo | null;
 }
 
 export interface TraceEntry {
@@ -206,6 +229,8 @@ export interface DecideResponse {
   classifications: string[]; findings: Finding[]; regulations: string[];
   payload: unknown; redactions: Record<string, unknown>[];
   unsupported_obligations: string[];
+  route: RoutingInfo | null;
+  payload_truncated: boolean;
   explain: { trace?: TraceEntry[] } | null;
   latency_ms: number; policy_errors: string[];
 }
@@ -222,6 +247,7 @@ export interface ClassifyResponse {
 }
 
 export interface AuditRecord {
+  stream: string;
   seq: number; timestamp: string; event: string; actor: string; subject: string;
   payload: Record<string, unknown>; prev_hash: string; record_hash: string;
 }
@@ -229,6 +255,63 @@ export interface AuditRecord {
 export interface ChainVerification {
   valid: boolean; checked: number; corrupted: number[];
   broken_links: number[]; sequence_errors: number[]; message: string;
+}
+
+/** The log is many chains; verification covers each, then the set. */
+export interface AuditVerification {
+  valid: boolean;
+  message: string;
+  streams: Record<string, ChainVerification>;
+  checkpoint: {
+    valid?: boolean; checked: number; message: string;
+    missing?: string[]; truncated?: string[]; diverged?: string[];
+  };
+}
+
+export interface StreamHead { stream: string; seq: number; head_hash: string }
+export interface StreamListing {
+  streams: StreamHead[]; count: number; total_records: number;
+}
+
+export interface Source {
+  name: string; adapter: string; description: string; enabled: boolean;
+  target: string; owner: string; include: string[]; exclude: string[];
+  scan: boolean; max_assets: number; sample_limit: number; min_confidence: number;
+}
+
+export interface DiscoverRequest {
+  scan?: boolean | null; dry_run?: boolean;
+  include?: string[] | null; exclude?: string[] | null;
+}
+
+export interface AssetOutcome {
+  urn: string; name: string; kind: string; created: boolean;
+  labels_imported: string[]; labels_scanned: string[];
+  sampled: boolean; records_sampled: number; partial_sample: boolean;
+  error: string | null;
+}
+
+export interface DiscoveryReport {
+  source: string; adapter: string; dry_run: boolean; scanned: boolean;
+  discovered: number; created: number; updated: number; failed: number;
+  classified: number; label_counts: Record<string, number>;
+  regulations: string[]; truncated: boolean; errors: string[];
+  duration_ms: number; assets: AssetOutcome[];
+}
+
+export interface DetokenizeResult { token: string; recovered: boolean; value: string | null }
+export interface DetokenizeResponse {
+  results: DetokenizeResult[]; recovered: number; requested: number;
+}
+export interface VerifyTokenRequest {
+  token: string; label: string; value: string; justification: string;
+}
+
+export interface ApiKey {
+  prefix: string; name: string; description: string; scopes: string[];
+  allowed_principals: string[]; created_by: string;
+  created_at: string | null; last_used_at: string | null;
+  expires_at: string | null; revoked_at: string | null;
 }
 
 export interface Approval {

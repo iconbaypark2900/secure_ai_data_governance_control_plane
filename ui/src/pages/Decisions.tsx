@@ -136,6 +136,40 @@ function DecisionDetail({ id, onBack }: { id: string; onBack: () => void }) {
             </table>
           </div>
 
+          {decision.data.route && (
+            <div className="card">
+              <h2>Where it was sent</h2>
+              <div className="row">
+                <span className="mono">{decision.data.route.target ?? "nowhere"}</span>
+                {decision.data.route.redirected
+                  ? <span className="pill require_approval">redirected</span>
+                  : <span className="pill neutral">as requested</span>}
+              </div>
+              <p className="dim">{decision.data.route.reason}</p>
+              {Object.keys(decision.data.route.rejected).length > 0 && (
+                <>
+                  <p className="small dim">
+                    Why the others lost — “why did my request go there?” is asked
+                    far more often than it is answerable.
+                  </p>
+                  <div className="table-wrap">
+                    <table>
+                      <thead><tr><th>model</th><th>reason</th></tr></thead>
+                      <tbody>
+                        {Object.entries(decision.data.route.rejected).map(([urn, why]) => (
+                          <tr key={urn}>
+                            <td className="mono">{urn}</td>
+                            <td className="small dim">{why}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
           {decision.data.obligations.length > 0 && (
             <div className="card">
               <h2>Obligations</h2>

@@ -4,6 +4,7 @@ import { Banner, Loading } from "../components/atoms";
 
 export function TaxonomyPage() {
   const taxonomy = useAsync(() => api.taxonomy(), []);
+  const schema = useAsync(() => api.policySchema(), []);
 
   return (
     <>
@@ -16,6 +17,32 @@ export function TaxonomyPage() {
           covers every <span className="mono">pii.*</span> beneath it.
         </p>
       </div>
+
+      {schema.data && (
+        <div className="card">
+          <h2>The policy language</h2>
+          <p className="small dim">
+            Served from the running engine rather than a document, so it cannot
+            drift from what is actually accepted.
+          </p>
+          <table>
+            <tbody>
+              <tr><td className="dim">selectors</td>
+                <td>{schema.data.selectors.map((x) => <span key={x} className="tag">{x}</span>)}</td></tr>
+              <tr><td className="dim">operators</td>
+                <td>{schema.data.operators.map((x) => <span key={x} className="tag">{x}</span>)}</td></tr>
+              <tr><td className="dim">effects</td>
+                <td>{schema.data.effects.map((x) => <span key={x} className="tag">{x}</span>)}</td></tr>
+              <tr><td className="dim">combinators</td>
+                <td>{schema.data.combinators.map((x) => <span key={x} className="tag">{x}</span>)}</td></tr>
+              <tr><td className="dim">obligations</td>
+                <td>{schema.data.obligation_types.map((x) => <span key={x} className="tag">{x}</span>)}</td></tr>
+              <tr><td className="dim">redaction</td>
+                <td>{schema.data.redaction_strategies.map((x) => <span key={x} className="tag">{x}</span>)}</td></tr>
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {taxonomy.error && <Banner kind="error">{taxonomy.error}</Banner>}
       {taxonomy.loading && <Loading />}

@@ -8,21 +8,27 @@ import { Simulator } from "./pages/Simulator";
 import { Audit } from "./pages/Audit";
 import { Approvals } from "./pages/Approvals";
 import { TaxonomyPage } from "./pages/Taxonomy";
+import { Discovery } from "./pages/Discovery";
+import { Tokens } from "./pages/Tokens";
+import { Keys } from "./pages/Keys";
 import { Banner } from "./components/atoms";
 
 type View =
-  | "dashboard" | "simulator" | "policies" | "catalog"
-  | "decisions" | "approvals" | "audit" | "taxonomy";
+  | "dashboard" | "simulator" | "policies" | "catalog" | "discovery"
+  | "decisions" | "approvals" | "tokens" | "audit" | "taxonomy" | "keys";
 
 const NAV: { id: View; label: string }[] = [
   { id: "dashboard", label: "Overview" },
   { id: "simulator", label: "Simulator" },
   { id: "policies", label: "Policies" },
   { id: "catalog", label: "Catalog" },
+  { id: "discovery", label: "Discovery" },
   { id: "decisions", label: "Decisions" },
   { id: "approvals", label: "Approvals" },
+  { id: "tokens", label: "Tokens" },
   { id: "audit", label: "Audit trail" },
   { id: "taxonomy", label: "Taxonomy" },
+  { id: "keys", label: "Keys" },
 ];
 
 export function App() {
@@ -85,12 +91,15 @@ export function App() {
         {view === "simulator" && <Simulator />}
         {view === "policies" && <Policies />}
         {view === "catalog" && <Catalog />}
+        {view === "discovery" && <Discovery />}
         {view === "decisions" && (
           <Decisions openId={openDecision} onOpen={setOpenDecision} />
         )}
         {view === "approvals" && <Approvals />}
+        {view === "tokens" && <Tokens />}
         {view === "audit" && <Audit />}
         {view === "taxonomy" && <TaxonomyPage />}
+        {view === "keys" && <Keys />}
       </main>
     </div>
   );
