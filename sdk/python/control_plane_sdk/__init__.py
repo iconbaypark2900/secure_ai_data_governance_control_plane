@@ -18,9 +18,16 @@ and honour the answer.
     if not decision.allowed:
         raise DecisionDenied(decision)
     safe_chunk = decision.payload   # obligations already applied
+
+When a policy parks the request for a human, wait and re-send it unchanged:
+
+    if decision.needs_approval:
+        await client.await_approval(decision.approval_id, timeout=600)
+        decision = await client.decide(..., approval_id=decision.approval_id)
 """
 
 from control_plane_sdk.client import (
+    ApprovalTimeout,
     AsyncControlPlaneClient,
     ControlPlaneClient,
     ControlPlaneError,
@@ -31,6 +38,7 @@ from control_plane_sdk.client import (
 )
 
 __all__ = [
+    "ApprovalTimeout",
     "AsyncControlPlaneClient",
     "ControlPlaneClient",
     "ControlPlaneError",

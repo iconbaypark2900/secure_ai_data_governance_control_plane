@@ -1,10 +1,13 @@
 import { useState } from "react";
-import { api } from "../lib/api";
+import { api, type Approval } from "../lib/api";
 import { useAsync } from "../lib/useAsync";
 import { Banner, Empty, LabelTag, Loading, when } from "../components/atoms";
 
+const STATUSES = ["pending", "granted", "denied", "expired"] as const;
+
 export function Approvals() {
-  const approvals = useAsync(() => api.approvals(), []);
+  const [status, setStatus] = useState<string>("pending");
+  const approvals = useAsync(() => api.approvals({ status }), [status]);
   const [note, setNote] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -32,6 +35,24 @@ export function Approvals() {
           rather than choosing between blocking legitimate work and waving through
           risky work.
         </p>
+        <p className="small dim">
+          Granting does not perform the action. It issues a single-use capability,
+          bound to the exact request you reviewed, which the enforcement point then
+          redeems by re-sending that request. It cannot be transferred to a different
+          request and it cannot override a deny.
+        </p>
+      </div>
+
+      <div className="row" style={{ marginBottom: 12 }}>
+        {STATUSES.map((name) => (
+          <button
+            key={name}
+            className={status === name ? "primary" : ""}
+            onClick={() => setStatus(name)}
+          >
+            {name}
+          </button>
+        ))}
       </div>
 
       {(approvals.error || error) && <Banner kind="error">{approvals.error ?? error}</Banner>}
@@ -44,7 +65,7 @@ export function Approvals() {
         <div className="card" key={approval.id}>
           <div className="spread">
             <div className="row">
-              <span className="pill require_approval">{approval.status}</span>
+              <StatusPill approval={approval} />
               <strong className="mono">{approval.decision?.action}</strong>
               <span className="mono">{approval.decision?.resource_urn}</span>
             </div>
@@ -68,6 +89,13 @@ export function Approvals() {
               )}
               <tr><td className="dim">expires</td>
                 <td className="small">{when(approval.expires_at)}</td></tr>
+              {approval.redeemed_at && (
+                <tr><td className="dim">redeemed</td>
+                  <td className="small">
+                    {when(approval.redeemed_at)} by{" "}
+                    <span className="mono">{approval.redeemed_by ?? "—"}</span>
+                  </td></tr>
+              )}
             </tbody>
           </table>
 
@@ -93,12 +121,40 @@ export function Approvals() {
           )}
 
           {approval.status !== "pending" && (
-            <p className="small dim">
-              {approval.status} by {approval.decided_by ?? "—"} · {approval.decision_note || "no note"}
-            </p>
+            <>
+              <p className="small dim">
+                {approval.status} by {approval.decided_by ?? "—"} ·{" "}
+                {approval.decision_note || "no note"}
+              </p>
+              {approval.redeemable && (
+                <p className="small dim">
+                  Granted and not yet used. The enforcement point redeems it by
+                  re-sending the request it was granted for.
+                </p>
+              )}
+              {approval.status === "granted" && approval.redeemed_at && (
+                <p className="small dim">
+                  Spent on decision{" "}
+                  <span className="mono">{approval.redeemed_decision_id}</span>. Single
+                  use: a further attempt with this approval will be refused.
+                </p>
+              )}
+            </>
           )}
         </div>
       ))}
     </>
   );
+}
+
+
+/** Status, with the extra state that matters: granted but not yet used. */
+function StatusPill({ approval }: { approval: Approval }) {
+  if (approval.status === "granted" && approval.redeemed_at) {
+    return <span className="pill neutral">redeemed</span>;
+  }
+  if (approval.redeemable) return <span className="pill allow">granted · unused</span>;
+  if (approval.status === "denied") return <span className="pill deny">denied</span>;
+  if (approval.status === "expired") return <span className="pill neutral">expired</span>;
+  return <span className="pill require_approval">{approval.status}</span>;
 }

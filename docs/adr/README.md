@@ -12,3 +12,4 @@ costs — the last part being the one that is never reconstructible afterwards.
 | [0004](0004-fail-closed.md) | Fail closed everywhere, by default |
 | [0005](0005-separate-label-selectors.md) | Keep catalog labels and payload findings separate |
 | [0006](0006-no-payload-persistence.md) | Never persist payload content |
+| [0007](0007-approvals-are-scoped-capabilities.md) | Make an approval a scoped, single-use capability |

@@ -11,6 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "sdk" / "python"))
 
 from control_plane_sdk import (
+    ApprovalTimeout,
     AsyncControlPlaneClient,
     ControlPlaneError,
     ControlPlaneUnavailable,
@@ -197,3 +198,103 @@ class TestRequestShape:
         assert body["resource"]["classifications"] == ["pii.email"]
         assert body["correlation_id"] == "trace-9"
         assert body["options"]["apply_obligations"] is True
+
+
+PARKED_BODY = {
+    "effect": "require_approval",
+    "reason": "'Export needs a named approver' produced 'require_approval'",
+    "decision_id": "22222222-2222-2222-2222-222222222222",
+    "approval": {
+        "id": "33333333-3333-3333-3333-333333333333",
+        "status": "pending",
+        "requested_by": "user:analyst",
+        "created_at": "2026-08-28T12:00:00+00:00",
+    },
+}
+
+
+class TestApprovalFlow:
+    def test_a_parked_decision_exposes_the_handle_to_wait_on(self) -> None:
+        decision = Decision.from_response(PARKED_BODY)
+        assert decision.needs_approval is True
+        assert decision.allowed is False
+        assert decision.approval_id == "33333333-3333-3333-3333-333333333333"
+
+    def test_a_decision_with_no_approval_has_no_handle(self) -> None:
+        assert Decision.from_response(ALLOW_BODY).approval_id is None
+
+    def test_redemption_is_reported(self) -> None:
+        decision = Decision.from_response({**ALLOW_BODY, "approval_redeemed": True})
+        assert decision.approval_redeemed is True
+        assert decision.approval_error is None
+
+    def test_a_failed_redemption_says_why(self) -> None:
+        decision = Decision.from_response(
+            {**PARKED_BODY, "approval_error": "the approval expired at 2026-08-27T12:00:00+00:00"}
+        )
+        assert "expired" in decision.approval_error
+
+    async def test_the_approval_id_is_sent(self) -> None:
+        captured: dict = {}
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            import json
+
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json=ALLOW_BODY)
+
+        client = client_with(capture)
+        await client.decide(principal_id="user:analyst", action="export", approval_id="abc-123")
+        assert captured["body"]["approval_id"] == "abc-123"
+
+    async def test_a_redemption_is_never_served_from_cache(self) -> None:
+        """Redeeming spends the approval; a cached reply would skip or replay it."""
+        calls = {"count": 0}
+
+        def counting(_request: httpx.Request) -> httpx.Response:
+            calls["count"] += 1
+            return httpx.Response(200, json=ALLOW_BODY)
+
+        client = client_with(counting, cache_ttl=60)
+        for _ in range(3):
+            await client.decide(principal_id="user:analyst", action="export", approval_id="abc-123")
+        assert calls["count"] == 3
+
+    async def test_a_redemption_does_not_poison_the_cache(self) -> None:
+        """The allow it produced must not be replayed for the plain question."""
+        seen: list[dict] = []
+
+        def recording(request: httpx.Request) -> httpx.Response:
+            import json
+
+            body = json.loads(request.content)
+            seen.append(body)
+            return httpx.Response(200, json=ALLOW_BODY if body.get("approval_id") else PARKED_BODY)
+
+        client = client_with(recording, cache_ttl=60)
+        await client.decide(principal_id="user:analyst", action="export", approval_id="abc")
+        plain = await client.decide(principal_id="user:analyst", action="export")
+        assert plain.needs_approval is True
+        assert len(seen) == 2
+
+    async def test_await_approval_returns_once_resolved(self) -> None:
+        states = iter(["pending", "pending", "granted"])
+
+        def polling(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"id": "abc", "status": next(states)})
+
+        client = client_with(polling)
+        result = await client.await_approval("abc", timeout=5, poll_interval=0.001)
+        assert result["status"] == "granted"
+
+    async def test_await_approval_returns_a_refusal_rather_than_raising(self) -> None:
+        """A denial is an answer. The caller decides what to do about it."""
+        client = client_with(lambda _r: httpx.Response(200, json={"id": "abc", "status": "denied"}))
+        assert (await client.await_approval("abc"))["status"] == "denied"
+
+    async def test_await_approval_gives_up(self) -> None:
+        client = client_with(
+            lambda _r: httpx.Response(200, json={"id": "abc", "status": "pending"})
+        )
+        with pytest.raises(ApprovalTimeout, match="still unresolved"):
+            await client.await_approval("abc", timeout=0.01, poll_interval=0.001)

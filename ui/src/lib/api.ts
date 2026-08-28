@@ -95,7 +95,9 @@ export const api = {
     request<Page<AuditRecord>>(`/audit?${new URLSearchParams(params)}`),
   verifyAudit: () => request<ChainVerification>("/audit/verify"),
 
-  approvals: () => request<Approval[]>("/approvals"),
+  approvals: (params: Record<string, string> = {}) =>
+    request<Approval[]>(`/approvals?${new URLSearchParams(params)}`),
+  approval: (id: string) => request<Approval>(`/approvals/${id}`),
   resolveApproval: (id: string, grant: boolean, note: string) =>
     request<Approval>(`/approvals/${id}/decide?grant=${grant}`, {
       method: "POST",
@@ -233,6 +235,10 @@ export interface Approval {
   id: string; decision_id: string; status: string; requested_by: string;
   justification: string; decided_by: string | null; decision_note: string;
   created_at: string | null; resolved_at: string | null; expires_at: string | null;
+  redeemed_at: string | null; redeemed_by: string | null;
+  redeemed_decision_id: string | null;
+  /** Granted, unspent, and not yet expired — an enforcement point can use it now. */
+  redeemable: boolean;
   decision?: {
     action: string; resource_urn: string; principal_id: string;
     classifications: string[]; reason: string; determining_policy: string | null;

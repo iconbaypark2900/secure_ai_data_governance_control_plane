@@ -126,6 +126,13 @@ Then two writes, in the same transaction as the caller's:
 Both or neither. An audit record for a rolled-back operation is a lie in the
 other direction.
 
+A `require_approval` result also parks the decision — or, if the caller presented
+a valid approval, spends it and records what it was spent on. The redemption path
+runs between evaluation and response: it can only turn `require_approval` into
+`allow`, it re-collects obligations so nothing is shed on the way, and it leaves
+a deny untouched. See
+[ADR 0007](adr/0007-approvals-are-scoped-capabilities.md).
+
 ### Failure
 
 The whole pipeline is wrapped. Any exception between ① and ④ produces a deny with

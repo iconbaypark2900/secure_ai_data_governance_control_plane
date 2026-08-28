@@ -370,3 +370,108 @@ class TestApprovals:
             f"/v1/approvals/{approval_id}/decide?grant=false", json={"note": ""}
         )
         assert again.status_code == 409
+
+
+class TestApprovalRedemptionOverHttp:
+    """The loop a reviewer will actually walk through by hand."""
+
+    @pytest.fixture
+    async def parked(self, client):
+        await client.post(
+            "/v1/policies",
+            json={
+                "policy": {
+                    "key": "approve-exports",
+                    "name": "Exports need a human",
+                    "effect": "require_approval",
+                    "priority": 500,
+                    "match": {"action": "export"},
+                }
+            },
+        )
+        response = await client.post("/v1/decide", json=decide_body(action="export"))
+        return client, response.json()
+
+    async def test_the_whole_loop(self, parked) -> None:
+        client, decision = parked
+        assert decision["effect"] == "require_approval"
+        approval_id = decision["approval"]["id"]
+
+        # Nothing to redeem yet.
+        pending = await client.post(
+            "/v1/decide", json=decide_body(action="export", approval_id=approval_id)
+        )
+        assert pending.json()["effect"] == "require_approval"
+        assert "awaiting a decision" in pending.json()["approval_error"]
+
+        # A human grants it.
+        granted = await client.post(
+            f"/v1/approvals/{approval_id}/decide?grant=true", json={"note": "DATA-1183"}
+        )
+        assert granted.json()["status"] == "granted"
+
+        # The same request now succeeds.
+        redeemed = await client.post(
+            "/v1/decide", json=decide_body(action="export", approval_id=approval_id)
+        )
+        body = redeemed.json()
+        assert body["effect"] == "allow"
+        assert body["approval_redeemed"] is True
+        assert body["approval"]["decision_note"] == "DATA-1183"
+
+        # And only once.
+        again = await client.post(
+            "/v1/decide", json=decide_body(action="export", approval_id=approval_id)
+        )
+        assert again.json()["effect"] == "require_approval"
+        assert "already redeemed" in again.json()["approval_error"]
+
+    async def test_polling_endpoint_reports_redeemability(self, parked) -> None:
+        client, decision = parked
+        approval_id = decision["approval"]["id"]
+
+        before = (await client.get(f"/v1/approvals/{approval_id}")).json()
+        assert before["status"] == "pending"
+        assert before["redeemable"] is False
+
+        await client.post(f"/v1/approvals/{approval_id}/decide?grant=true", json={"note": ""})
+        after = (await client.get(f"/v1/approvals/{approval_id}")).json()
+        assert after["redeemable"] is True
+        assert after["decision"]["action"] == "export"
+
+        await client.post("/v1/decide", json=decide_body(action="export", approval_id=approval_id))
+        spent = (await client.get(f"/v1/approvals/{approval_id}")).json()
+        assert spent["redeemable"] is False
+        assert spent["redeemed_at"] is not None
+        assert spent["redeemed_decision_id"] is not None
+
+    async def test_an_approval_does_not_transfer_to_another_request(self, parked) -> None:
+        client, decision = parked
+        approval_id = decision["approval"]["id"]
+        await client.post(f"/v1/approvals/{approval_id}/decide?grant=true", json={"note": ""})
+
+        elsewhere = await client.post(
+            "/v1/decide",
+            json=decide_body(
+                action="export", resource={"urn": "pg://somewhere.else"}, approval_id=approval_id
+            ),
+        )
+        assert elsewhere.json()["effect"] == "require_approval"
+        assert "different request" in elsewhere.json()["approval_error"]
+
+    async def test_an_unknown_approval_is_a_404_on_the_polling_endpoint(self, client) -> None:
+        import uuid
+
+        response = await client.get(f"/v1/approvals/{uuid.uuid4()}")
+        assert response.status_code == 404
+
+    async def test_redemption_is_visible_in_the_audit_chain(self, parked) -> None:
+        client, decision = parked
+        approval_id = decision["approval"]["id"]
+        await client.post(f"/v1/approvals/{approval_id}/decide?grant=true", json={"note": ""})
+        await client.post("/v1/decide", json=decide_body(action="export", approval_id=approval_id))
+
+        events = (await client.get("/v1/audit")).json()
+        kinds = {item["event"] for item in events["items"]}
+        assert {"approval.requested", "approval.granted", "approval.redeemed"} <= kinds
+        assert (await client.get("/v1/audit/verify")).json()["valid"] is True

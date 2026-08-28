@@ -63,6 +63,7 @@ class AuditEvent(StrEnum):
     APPROVAL_REQUESTED = "approval.requested"
     APPROVAL_GRANTED = "approval.granted"
     APPROVAL_DENIED = "approval.denied"
+    APPROVAL_REDEEMED = "approval.redeemed"
     KEY_ISSUED = "apikey.issued"
     KEY_REVOKED = "apikey.revoked"
     SCAN_COMPLETED = "scan.completed"

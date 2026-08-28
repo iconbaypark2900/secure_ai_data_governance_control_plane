@@ -156,6 +156,47 @@ than being forced to choose between blocking legitimate work and waving through
 risky work. Bulk export of a customer table is the canonical case: legitimate,
 occasionally necessary, and also exactly what exfiltration looks like.
 
+### The approval loop
+
+```
+  POST /v1/decide                    -> require_approval + approval.id
+  GET  /v1/approvals/{id}            -> poll; cheap, evaluates nothing
+  POST /v1/approvals/{id}/decide     -> a human grants or denies it
+  POST /v1/decide  + approval_id     -> allow, and the approval is spent
+```
+
+Redeeming means re-sending **the same request** with `approval_id` set. From the
+SDK:
+
+```python
+decision = await client.decide(principal_id=..., action="export", resource_urn=...)
+if decision.needs_approval:
+    await client.await_approval(decision.approval_id, timeout=600)
+    decision = await client.decide(..., approval_id=decision.approval_id)
+rows = decision.enforce()
+```
+
+A granted approval is a capability, and it is scoped like one:
+
+| | |
+|---|---|
+| **Bound to the request** | A keyed fingerprint over principal, action, resource, labels, payload, and context. Change any of them — a different table, an external destination, a different payload — and it will not redeem. |
+| **Single use** | Spending it records the decision it was spent on. A second attempt is refused. |
+| **Expiring** | Checked at redemption, not only at grant. |
+| **Subordinate to deny** | Redemption re-evaluates policy and only turns `require_approval` into `allow`. A deny that now applies still denies, and the approval is *not* consumed, so it still works if the deny is lifted. |
+
+Redeeming also re-collects obligations across both the `allow` and
+`require_approval` policies that matched. An `allow` policy that lost to the
+parking rule still said "if you permit this, redact the SSNs", and an approval
+must not be a way to shed that.
+
+`approval_error` on the response says why a presented approval did not apply. It
+is written to be actionable: "still awaiting a decision" means keep polling,
+"granted for a different request" and "already redeemed" mean stop.
+
+Re-sending a parked request returns the ticket it already has rather than
+queueing another, so a retrying caller cannot flood the reviewer.
+
 ### Combining algorithms
 
 | algorithm | resolution |

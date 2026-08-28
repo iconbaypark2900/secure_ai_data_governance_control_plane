@@ -12,7 +12,7 @@ and produce byte-identical output. Everything the engine needs arrives in the
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Container, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -378,21 +378,11 @@ class PolicyEngine:
         return self._default_effect, None  # pragma: no cover - unreachable
 
     @staticmethod
-    def _collect_obligations(matched: Sequence[Policy], effect: Effect) -> tuple[Obligation, ...]:
-        """Union the obligations of every matched policy sharing the winning effect.
-
-        Union, not override: obligations only ever add constraints, so combining
-        them can make a decision stricter but never looser.
-        """
-        if effect is Effect.DENY:
-            return ()
+    def _union_obligations(policies: Iterable[Policy]) -> tuple[Obligation, ...]:
+        """Deduplicated obligations from a set of policies, strongest first."""
         collected: list[Obligation] = []
         seen: set[str] = set()
-        relevant = sorted(
-            (p for p in matched if p.effect is effect),
-            key=lambda p: (-p.priority, p.key),
-        )
-        for policy in relevant:
+        for policy in sorted(policies, key=lambda p: (-p.priority, p.key)):
             for obligation in policy.obligations:
                 fingerprint = repr(sorted(obligation.to_dict().items(), key=lambda kv: kv[0]))
                 if fingerprint in seen:
@@ -400,6 +390,34 @@ class PolicyEngine:
                 seen.add(fingerprint)
                 collected.append(obligation)
         return tuple(collected)
+
+    @classmethod
+    def _collect_obligations(
+        cls, matched: Sequence[Policy], effect: Effect
+    ) -> tuple[Obligation, ...]:
+        """Union the obligations of every matched policy sharing the winning effect.
+
+        Union, not override: obligations only ever add constraints, so combining
+        them can make a decision stricter but never looser.
+        """
+        if effect is Effect.DENY:
+            return ()
+        return cls._union_obligations(p for p in matched if p.effect is effect)
+
+    def obligations_for(
+        self, policy_keys: Iterable[str], effects: Container[Effect]
+    ) -> tuple[Obligation, ...]:
+        """Obligations from the named policies whose effect is in ``effects``.
+
+        Used when a decision changes effect after evaluation -- specifically when
+        a human approval turns ``require_approval`` into ``allow``. The duties an
+        ``allow`` policy would have imposed have to come with it, or redeeming an
+        approval would become a way to shed the redaction that policy required.
+        """
+        wanted = set(policy_keys)
+        return self._union_obligations(
+            policy for policy in self._policies if policy.key in wanted and policy.effect in effects
+        )
 
     def _describe(
         self,

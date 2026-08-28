@@ -24,10 +24,12 @@ from __future__ import annotations
 import time
 import uuid
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.audit.chain import AuditEvent, as_utc, content_digest
@@ -121,6 +123,23 @@ class PolicyDecisionPoint:
             active_engine = engine or await self._policies.build_engine()
             decision = active_engine.evaluate(access, explain=request.options.explain)
 
+            payload_digest = (
+                content_digest(request.payload, self._settings.audit_key_bytes())
+                if request.payload is not None
+                else None
+            )
+            fingerprint = self._fingerprint(access, payload_digest)
+
+            # A human approval, if one is being presented and actually applies.
+            approval: ApprovalRequest | None = None
+            approval_error: str | None = None
+            if decision.effect is Effect.REQUIRE_APPROVAL and request.approval_id is not None:
+                approval, approval_error = await self._validate_approval(
+                    request.approval_id, fingerprint
+                )
+                if approval is not None:
+                    decision = self._redeemed_decision(decision, approval, active_engine)
+
         except Exception as exc:
             # Fail closed. An exception here means the control plane could not
             # establish that the request is safe, which is not the same as it
@@ -136,21 +155,31 @@ class PolicyDecisionPoint:
             )
 
         response = self._build_response(request, decision, findings, all_labels)
+        response.approval_error = approval_error
+        response.approval_redeemed = approval is not None
+        if approval is not None:
+            response.approval = _approval_out(approval)
 
         if request.options.persist:
             record = await self._persist(
-                request, decision, response, findings, started, actor=actor
+                request,
+                decision,
+                response,
+                findings,
+                started,
+                actor=actor,
+                payload_digest=payload_digest,
             )
             response.decision_id = record.id
-            if decision.effect is Effect.REQUIRE_APPROVAL:
-                approval = await self._park_for_approval(record, request)
-                response.approval = ApprovalOut(
-                    id=approval.id,
-                    status=approval.status,
-                    requested_by=approval.requested_by,
-                    created_at=_iso(approval.created_at),
-                    expires_at=_iso(approval.expires_at),
-                )
+
+            if approval is not None:
+                # Spend it. Single use: "approve this one export" must not
+                # become "approve every export until the window closes".
+                await self._mark_redeemed(approval, record.id, actor=actor)
+                response.approval = _approval_out(approval)
+            elif decision.effect is Effect.REQUIRE_APPROVAL:
+                parked = await self._park_for_approval(record, request, fingerprint)
+                response.approval = _approval_out(parked)
 
         response.latency_ms = round((time.perf_counter() - started) * 1000, 3)
         return response
@@ -248,13 +277,10 @@ class PolicyDecisionPoint:
         started: float,
         *,
         actor: str,
+        payload_digest: str | None = None,
     ) -> DecisionRecord:
         latency_ms = round((time.perf_counter() - started) * 1000, 3)
-        digest = (
-            content_digest(request.payload, self._settings.audit_key_bytes())
-            if request.payload is not None
-            else None
-        )
+        digest = payload_digest
 
         record = DecisionRecord(
             id=uuid.uuid4(),
@@ -303,15 +329,127 @@ class PolicyDecisionPoint:
         )
         return record
 
+    # --- approvals ----------------------------------------------------------- #
+
+    def _fingerprint(self, access: AccessRequest, payload_digest: str | None) -> str:
+        """A keyed digest of everything a reviewer was implicitly agreeing to.
+
+        This is what scopes an approval to one request. Without it, an approval
+        id is a bearer capability for *any* request that happens to need one:
+        get an innocuous export approved, then present the same id for an
+        exfiltration. Every policy-relevant input goes in, so if any of them
+        changed -- the resource was reclassified, the destination flipped to
+        external, the payload is different -- the binding no longer matches and
+        the approval will not redeem.
+        """
+        return content_digest(
+            {
+                "principal_id": access.principal.id,
+                "principal_type": str(access.principal.type),
+                "action": access.action,
+                "resource_urn": access.resource.urn,
+                "classifications": sorted(access.resource.classifications),
+                "findings": sorted(access.findings),
+                "context": _safe_context(access.context),
+                "payload": payload_digest,
+            },
+            self._settings.audit_key_bytes(),
+        )
+
+    async def _validate_approval(
+        self, approval_id: uuid.UUID, fingerprint: str
+    ) -> tuple[ApprovalRequest | None, str | None]:
+        """Look up a presented approval and decide whether it applies here."""
+        approval = (
+            await self._session.execute(
+                select(ApprovalRequest).where(ApprovalRequest.id == approval_id)
+            )
+        ).scalar_one_or_none()
+        if approval is None:
+            return None, f"no approval request {approval_id}"
+        error = approval.redemption_error(fingerprint, datetime.now(UTC))
+        if error is not None:
+            return None, error
+        return approval, None
+
+    def _redeemed_decision(
+        self, decision: Decision, approval: ApprovalRequest, engine: PolicyEngine
+    ) -> Decision:
+        """Turn a parked decision into an allow, carrying every duty with it.
+
+        Obligations are re-collected across both ``allow`` and
+        ``require_approval`` policies. An ``allow`` policy that matched but lost
+        to the parking rule still said "if you permit this, redact the PII", and
+        redeeming an approval must not become a way to shed that.
+        """
+        obligations = engine.obligations_for(
+            decision.matched_policies, {Effect.ALLOW, Effect.REQUIRE_APPROVAL}
+        )
+        granted_by = approval.decided_by or "an unrecorded approver"
+        return replace(
+            decision,
+            effect=Effect.ALLOW,
+            obligations=obligations,
+            reason=(
+                f"{decision.reason}; redeemed approval {approval.id} granted by "
+                f"{granted_by} at {_iso(approval.resolved_at)}"
+            ),
+        )
+
+    async def _mark_redeemed(
+        self, approval: ApprovalRequest, decision_id: uuid.UUID, *, actor: str
+    ) -> None:
+        approval.redeemed_at = datetime.now(UTC)
+        approval.redeemed_by = actor or approval.requested_by
+        approval.redeemed_decision_id = decision_id
+        await self._session.flush()
+        await self._audit.append(
+            AuditEvent.APPROVAL_REDEEMED,
+            actor=actor or approval.requested_by,
+            subject=str(decision_id),
+            payload={
+                "approval_id": str(approval.id),
+                "decision_id": str(decision_id),
+                "granted_by": approval.decided_by,
+                "originally_parked_as": str(approval.decision_id),
+            },
+        )
+
     async def _park_for_approval(
-        self, record: DecisionRecord, request: DecideRequest
+        self, record: DecisionRecord, request: DecideRequest, fingerprint: str
     ) -> ApprovalRequest:
+        """Queue this request for a human, or hand back the ticket it already has.
+
+        A caller that re-sends a parked request -- a retry, an impatient poll, a
+        second worker picking up the same job -- must not create a second
+        approval each time. An identical request that is already awaiting a
+        decision gets the existing ticket back, so the queue stays a list of
+        distinct things to review rather than a log of attempts.
+        """
+        now = datetime.now(UTC)
+        existing = (
+            await self._session.execute(
+                select(ApprovalRequest)
+                .where(
+                    ApprovalRequest.request_fingerprint == fingerprint,
+                    ApprovalRequest.status == "pending",
+                )
+                .order_by(ApprovalRequest.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if existing is not None and (
+            existing.expires_at is None or _as_utc(existing.expires_at) > now
+        ):
+            return existing
+
         approval = ApprovalRequest(
             decision_id=record.id,
             status="pending",
             requested_by=request.principal.id,
             justification=str(request.context.get("justification", "")),
-            expires_at=datetime.now(UTC) + APPROVAL_TTL,
+            request_fingerprint=fingerprint,
+            expires_at=now + APPROVAL_TTL,
         )
         self._session.add(approval)
         await self._session.flush()
@@ -326,6 +464,22 @@ class PolicyDecisionPoint:
             },
         )
         return approval
+
+
+def _approval_out(approval: ApprovalRequest) -> ApprovalOut:
+    """The caller-facing view of an approval, at any point in its lifecycle."""
+    return ApprovalOut(
+        id=approval.id,
+        status=approval.status,
+        requested_by=approval.requested_by,
+        created_at=_iso(approval.created_at) or "",
+        expires_at=_iso(approval.expires_at),
+        decided_by=approval.decided_by,
+        decision_note=approval.decision_note,
+        resolved_at=_iso(approval.resolved_at),
+        redeemed_at=_iso(approval.redeemed_at),
+        redeemed_by=approval.redeemed_by,
+    )
 
 
 #: Context keys that must never be copied into a stored decision record.
@@ -350,6 +504,10 @@ def _safe_context(context: Mapping[str, Any]) -> dict[str, Any]:
         else:
             cleaned[str(key)] = value
     return cleaned
+
+
+def _as_utc(value: datetime) -> datetime:
+    return as_utc(value)
 
 
 def _iso(value: datetime | None) -> str | None:

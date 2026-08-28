@@ -29,6 +29,14 @@ def _out(approval: ApprovalRequest, decision: DecisionRecord | None = None) -> d
         "created_at": approval.created_at.isoformat() if approval.created_at else None,
         "resolved_at": approval.resolved_at.isoformat() if approval.resolved_at else None,
         "expires_at": approval.expires_at.isoformat() if approval.expires_at else None,
+        "redeemed_at": approval.redeemed_at.isoformat() if approval.redeemed_at else None,
+        "redeemed_by": approval.redeemed_by,
+        "redeemed_decision_id": (
+            str(approval.redeemed_decision_id) if approval.redeemed_decision_id else None
+        ),
+        # What the caller does next. Spelled out so an enforcement point does
+        # not have to reimplement the lifecycle from four nullable fields.
+        "redeemable": approval.status == "granted" and not approval.is_redeemed,
     }
     if decision is not None:
         payload["decision"] = {
@@ -62,6 +70,31 @@ async def list_approvals(
         statement = statement.where(ApprovalRequest.status == status_filter)
     rows = (await session.execute(statement)).all()
     return [_out(approval, decision) for approval, decision in rows]
+
+
+@router.get(
+    "/{approval_id}",
+    summary="Retrieve one approval request",
+    dependencies=[Depends(require_scope(Scope.APPROVALS))],
+)
+async def get_approval(approval_id: uuid.UUID, session: SessionDep) -> dict[str, Any]:
+    """Poll a parked decision.
+
+    An enforcement point waiting on a human polls here rather than re-sending
+    the decision: this is a cheap read, and it does not evaluate policy, write a
+    decision record, or seal an audit entry every few seconds.
+    """
+    row = (
+        await session.execute(
+            select(ApprovalRequest, DecisionRecord)
+            .join(DecisionRecord, DecisionRecord.id == ApprovalRequest.decision_id)
+            .where(ApprovalRequest.id == approval_id)
+        )
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"no approval request {approval_id}")
+    approval, decision = row
+    return _out(approval, decision)
 
 
 @router.post(

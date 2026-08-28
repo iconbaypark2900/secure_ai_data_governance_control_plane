@@ -122,7 +122,7 @@ two is what a redaction obligation is for.
 
 ---
 
-## The five things it does
+## The six things it does
 
 ### 1. Knows what the data is
 
@@ -201,7 +201,28 @@ Six strategies, differing in what they preserve:
 | `synthetic` | the shape, so parsers still work | test and eval data |
 | `drop` | nothing | when presence itself is the leak |
 
-### 5. Proves it afterwards
+### 5. Can require a person
+
+Some things should be neither blocked nor waved through. `require_approval`
+parks the decision, and a human grants it in the console or over the API:
+
+```
+POST /v1/decide                 -> require_approval + approval.id
+POST /v1/approvals/{id}/decide  -> a person grants it
+POST /v1/decide + approval_id   -> allow, and the approval is spent
+```
+
+What comes back is a capability, scoped like one. It is **bound** by a keyed
+fingerprint to the exact request a human reviewed — a different table, a
+different destination, a different payload, and it will not redeem. It is
+**single use**. It **expires**. And it is **subordinate to deny**: redemption
+re-evaluates policy, so a prohibition added after the grant still wins, and the
+approval survives unspent for when that prohibition is lifted.
+
+Without those four properties, "approve this one export" quietly becomes
+"approve anything, for anyone holding the id".
+
+### 6. Proves it afterwards
 
 Every decision and every policy change is sealed into a hash chain. Each record's
 digest is an **HMAC** over its own content *and* its predecessor's digest.
@@ -337,7 +358,7 @@ control_plane/
   audit/            the hash chain and its storage
   catalog/          assets, principals, pattern resolution
   adapters/         Postgres, Qdrant, MCP, LibreChat
-  api/v1/           35 HTTP operations
+  api/v1/           36 HTTP operations
   pdp.py            the pipeline that ties it together
   cli.py            cpctl
 sdk/python/         the enforcement-point client
@@ -345,7 +366,7 @@ pep/reverse_proxy/  the reference enforcement point
 ui/                 the admin console (React + TypeScript)
 seed/               the reference policy set and catalog
 migrations/         Alembic, including the append-only trigger
-tests/              239 tests
+tests/              280 tests
 docs/               architecture, the policy language, and the decision records
 ```
 
@@ -387,7 +408,7 @@ the next restart.
 ## Testing
 
 ```bash
-make test      # 232 tests on SQLite, no external dependencies
+make test      # 273 tests on SQLite, no external dependencies
 make test-pg   # + 7 that need real Postgres
 make check     # ruff, mypy, and the suite — everything CI runs
 ```

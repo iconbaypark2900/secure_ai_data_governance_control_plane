@@ -86,6 +86,13 @@ class DecideRequest(BaseModel):
         "batch. Scanned in memory; never stored.",
     )
     correlation_id: str | None = Field(default=None, max_length=128)
+    approval_id: uuid.UUID | None = Field(
+        default=None,
+        description="An approval to redeem. Present it by re-sending the request "
+        "that was parked, unchanged, with this set. A granted approval can only "
+        "turn 'require_approval' into 'allow'; it never overrides a deny, and it "
+        "only applies to the exact request a human reviewed.",
+    )
     options: DecideOptions = Field(default_factory=DecideOptions)
 
 
@@ -114,13 +121,22 @@ class RedactionOut(BaseModel):
 
 
 class ApprovalOut(BaseModel):
-    """The parked-decision handle returned with ``require_approval``."""
+    """The parked-decision handle returned with ``require_approval``.
+
+    Also returned on the redemption that consumes it, so a caller can see which
+    approval was spent and who authorised it without a second lookup.
+    """
 
     id: uuid.UUID
     status: str
     requested_by: str
     created_at: str
     expires_at: str | None = None
+    decided_by: str | None = None
+    decision_note: str = ""
+    resolved_at: str | None = None
+    redeemed_at: str | None = None
+    redeemed_by: str | None = None
 
 
 class DecideResponse(BaseModel):
@@ -159,6 +175,16 @@ class DecideResponse(BaseModel):
     )
 
     approval: ApprovalOut | None = None
+    approval_redeemed: bool = Field(
+        default=False,
+        description="True when a granted approval was consumed to produce this allow.",
+    )
+    approval_error: str | None = Field(
+        default=None,
+        description="Why a presented approval_id could not be redeemed. Machine "
+        "readable enough to tell 'still pending, keep waiting' apart from "
+        "'this will never work, stop retrying'.",
+    )
     explain: dict[str, Any] | None = None
     latency_ms: float = 0.0
     policy_errors: list[str] = Field(default_factory=list)

@@ -27,6 +27,7 @@ from typing import Any, Literal, Self
 import httpx
 
 __all__ = [
+    "ApprovalTimeout",
     "AsyncControlPlaneClient",
     "ControlPlaneClient",
     "ControlPlaneError",
@@ -35,6 +36,9 @@ __all__ = [
     "DecisionDenied",
     "ObligationUnsatisfied",
 ]
+
+#: Approval states from which nothing further will change on its own.
+TERMINAL_APPROVAL_STATES = frozenset({"granted", "denied", "expired"})
 
 DEFAULT_TIMEOUT = 5.0
 DEFAULT_RETRIES = 2
@@ -57,6 +61,15 @@ class DecisionDenied(ControlPlaneError):
     def __init__(self, decision: Decision) -> None:
         self.decision = decision
         super().__init__(f"denied: {decision.reason}")
+
+
+class ApprovalTimeout(ControlPlaneError):
+    """A parked decision was not resolved within the time allowed."""
+
+    def __init__(self, approval_id: str, waited: float) -> None:
+        self.approval_id = approval_id
+        self.waited = waited
+        super().__init__(f"approval {approval_id} was still unresolved after {waited:.0f}s")
 
 
 class ObligationUnsatisfied(ControlPlaneError):
@@ -96,6 +109,21 @@ class Decision:
     @property
     def needs_approval(self) -> bool:
         return self.effect == "require_approval"
+
+    @property
+    def approval_id(self) -> str | None:
+        """The approval to wait on, when this decision was parked for a human."""
+        return (self.approval or {}).get("id")
+
+    @property
+    def approval_redeemed(self) -> bool:
+        return bool(self.raw.get("approval_redeemed"))
+
+    @property
+    def approval_error(self) -> str | None:
+        """Why a presented approval did not apply, if one was presented."""
+        error = self.raw.get("approval_error")
+        return str(error) if error else None
 
     @property
     def redacted(self) -> bool:
@@ -208,6 +236,7 @@ def _build_body(
     context: Mapping[str, Any] | None,
     payload: Any,
     correlation_id: str | None,
+    approval_id: str | None,
     explain: bool,
     apply_obligations: bool,
 ) -> dict[str, Any]:
@@ -231,6 +260,8 @@ def _build_body(
         body["payload"] = payload
     if correlation_id:
         body["correlation_id"] = correlation_id
+    if approval_id:
+        body["approval_id"] = str(approval_id)
     return body
 
 
@@ -334,6 +365,7 @@ class AsyncControlPlaneClient(_ClientBase):
         context: Mapping[str, Any] | None = None,
         payload: Any = None,
         correlation_id: str | None = None,
+        approval_id: str | None = None,
         explain: bool = False,
         apply_obligations: bool = True,
         use_cache: bool = True,
@@ -351,13 +383,15 @@ class AsyncControlPlaneClient(_ClientBase):
             context=context,
             payload=payload,
             correlation_id=correlation_id,
+            approval_id=approval_id,
             explain=explain,
             apply_obligations=apply_obligations,
         )
 
-        # A decision about content depends on that content. Only the pure
-        # authorisation question is cacheable.
-        cacheable = use_cache and payload is None and not explain
+        # A decision about content depends on that content, and an approval
+        # redemption is a state change that must happen exactly once. Only the
+        # pure authorisation question is cacheable.
+        cacheable = use_cache and payload is None and not explain and approval_id is None
         key = _cache_key(body) if cacheable else ""
         if cacheable:
             cached = self._cache.get(key)
@@ -389,6 +423,43 @@ class AsyncControlPlaneClient(_ClientBase):
         )
         response.raise_for_status()
         return dict(response.json())
+
+    async def get_approval(self, approval_id: str) -> dict[str, Any]:
+        """Read the current state of a parked decision."""
+        response = await self._http().get(f"/v1/approvals/{approval_id}", headers=self._headers)
+        response.raise_for_status()
+        return dict(response.json())
+
+    async def await_approval(
+        self,
+        approval_id: str,
+        *,
+        # ASYNC109: this is a polling budget, not a cancellation scope. It has to
+        # raise a domain error the caller can act on -- "nobody approved this" --
+        # rather than CancelledError, and it mirrors the sync client's signature.
+        # A caller who wants cancellation can still wrap the call in asyncio.timeout.
+        timeout: float = 300.0,  # noqa: ASYNC109
+        poll_interval: float = 2.0,
+    ) -> dict[str, Any]:
+        """Poll until a human resolves the request, then return it.
+
+        Polls the approvals endpoint rather than re-sending the decision: that
+        is a cheap read, and it does not evaluate policy, write a decision
+        record, and seal an audit entry every couple of seconds.
+
+        Returns on any terminal state -- granted, denied, or expired -- so the
+        caller decides what to do about a refusal. Raises
+        :class:`ApprovalTimeout` if nobody has acted in time.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            approval = await self.get_approval(approval_id)
+            if str(approval.get("status")) in TERMINAL_APPROVAL_STATES:
+                return approval
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ApprovalTimeout(approval_id, timeout)
+            await _async_sleep(min(poll_interval, remaining))
 
     async def health(self) -> bool:
         try:
@@ -436,6 +507,7 @@ class ControlPlaneClient(_ClientBase):
         context: Mapping[str, Any] | None = None,
         payload: Any = None,
         correlation_id: str | None = None,
+        approval_id: str | None = None,
         explain: bool = False,
         apply_obligations: bool = True,
         use_cache: bool = True,
@@ -452,10 +524,12 @@ class ControlPlaneClient(_ClientBase):
             context=context,
             payload=payload,
             correlation_id=correlation_id,
+            approval_id=approval_id,
             explain=explain,
             apply_obligations=apply_obligations,
         )
-        cacheable = use_cache and payload is None and not explain
+        # Never cache an approval redemption: it is spent exactly once.
+        cacheable = use_cache and payload is None and not explain and approval_id is None
         key = _cache_key(body) if cacheable else ""
         if cacheable:
             cached = self._cache.get(key)
@@ -484,6 +558,30 @@ class ControlPlaneClient(_ClientBase):
         )
         response.raise_for_status()
         return dict(response.json())
+
+    def get_approval(self, approval_id: str) -> dict[str, Any]:
+        """Read the current state of a parked decision."""
+        response = self._http().get(f"/v1/approvals/{approval_id}", headers=self._headers)
+        response.raise_for_status()
+        return dict(response.json())
+
+    def await_approval(
+        self,
+        approval_id: str,
+        *,
+        timeout: float = 300.0,
+        poll_interval: float = 2.0,
+    ) -> dict[str, Any]:
+        """Block until a human resolves the request. See the async client."""
+        deadline = time.monotonic() + timeout
+        while True:
+            approval = self.get_approval(approval_id)
+            if str(approval.get("status")) in TERMINAL_APPROVAL_STATES:
+                return approval
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ApprovalTimeout(approval_id, timeout)
+            time.sleep(min(poll_interval, remaining))
 
     def health(self) -> bool:
         try:
