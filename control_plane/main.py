@@ -28,6 +28,7 @@ from control_plane.db import dispose_engine, get_sessionmaker
 from control_plane.logging import configure_logging
 from control_plane.models.auth import ApiKey
 from control_plane.policy.operators import PolicyError
+from control_plane.policy.store import PolicyStore
 
 log = structlog.get_logger(__name__)
 
@@ -63,6 +64,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         async with factory() as session:
             await session.execute(text("SELECT 1"))
             await _ensure_bootstrap_key(session, settings)
+            await _warn_about_unusable_policies(session, settings)
             await session.commit()
     except Exception as exc:
         # Not fatal: the readiness probe reports the database as unavailable and
@@ -114,6 +116,38 @@ async def _ensure_bootstrap_key(session: Any, settings: Settings) -> None:
         prefix=prefix,
         hint="Issue scoped keys and revoke this one.",
     )
+
+
+async def _warn_about_unusable_policies(session: Any, settings: Settings) -> None:
+    """Say at boot if a stored policy asks for something this process cannot do.
+
+    A policy requiring the ``tokenize`` strategy on a deployment with no
+    tokenisation key will deny every request it matches. That is the correct
+    behaviour and a miserable way to discover a missing environment variable --
+    so it is stated once, loudly, at startup rather than only in the reason
+    string of each denial.
+    """
+    if settings.tokenization_enabled:
+        return
+    try:
+        policies, _ = await PolicyStore(session).load_policies_with_errors(enabled_only=True)
+    except Exception as exc:
+        log.debug("policy_precheck_skipped", error=str(exc))
+        return
+
+    affected = sorted(
+        policy.key
+        for policy in policies
+        for obligation in policy.redaction_obligations
+        if str(obligation.to_dict().get("strategy", "")).lower() == "tokenize"
+    )
+    if affected:
+        log.error(
+            "tokenization_key_missing",
+            policies=affected,
+            impact="every request these policies match will be denied",
+            hint="set CP_TOKENIZATION_KEY, or change the redaction strategy",
+        )
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:

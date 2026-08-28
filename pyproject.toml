@@ -23,6 +23,7 @@ dependencies = [
     "rich>=13.9",
     "pyyaml>=6.0.2",
     "argon2-cffi>=23.1",
+    "cryptography>=44.0",
     "prometheus-client>=0.21",
 ]
 

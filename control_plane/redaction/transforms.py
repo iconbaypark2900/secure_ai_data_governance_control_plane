@@ -30,6 +30,7 @@ from typing import Any, Protocol
 
 from control_plane.classification import taxonomy
 from control_plane.classification.scanner import Finding
+from control_plane.redaction.tokenization import TokenizationUnavailable
 
 __all__ = [
     "AppliedRedaction",
@@ -62,13 +63,17 @@ class TokenVault(Protocol):
 
 
 class InMemoryTokenVault:
-    """A process-local vault.
+    """A process-local mapping vault.
 
-    Adequate for tests and single-process demos. A deployment that needs
-    re-identification across restarts should implement :class:`TokenVault`
-    against a real store with its own access controls and audit trail --
-    the vault is a re-identification capability and deserves to be governed
-    at least as tightly as the data it protects.
+    Kept for tests and for anyone who genuinely wants mapping-backed
+    tokenisation. It is *not* what the control plane uses:
+    :class:`~control_plane.redaction.tokenization.DeterministicTokenizer` makes
+    the token the ciphertext, so there is no table of sensitive values to hold
+    -- see `ADR 0009`.
+
+    Anything implementing :class:`TokenVault` with real storage is a
+    re-identification capability, and deserves to be governed at least as
+    tightly as the data it protects.
     """
 
     def __init__(self, key: bytes = b"") -> None:
@@ -234,9 +239,16 @@ class Redactor:
                 return self._hash(finding.label, value, rule.hash_length)
             case Strategy.TOKENIZE:
                 if self.vault is None:
-                    # Fail closed: without a vault, tokenising would silently
-                    # degrade to an irreversible hash the caller cannot reverse.
-                    return self._hash(finding.label, value, rule.hash_length)
+                    # Refuse rather than substitute. Emitting a hash here would
+                    # satisfy the shape of the obligation and not its meaning: a
+                    # policy asked for something reversible and would receive
+                    # something that is not, with nobody finding out until
+                    # somebody needed to reverse one.
+                    raise TokenizationUnavailable(
+                        f"policy requires the 'tokenize' strategy for "
+                        f"{finding.label!r}, but no tokeniser is configured; "
+                        f"set CP_TOKENIZATION_KEY"
+                    )
                 return self.vault.tokenize(finding.label, value)
             case Strategy.SYNTHETIC:
                 return self._synthetic(finding.label, value)

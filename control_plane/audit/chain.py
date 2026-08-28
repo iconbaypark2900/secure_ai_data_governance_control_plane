@@ -68,6 +68,8 @@ class AuditEvent(StrEnum):
     KEY_REVOKED = "apikey.revoked"
     SCAN_COMPLETED = "scan.completed"
     CATALOG_DISCOVERED = "catalog.discovered"
+    TOKENS_REVERSED = "tokens.reversed"
+    TOKENS_VERIFIED = "tokens.verified"
     CONFIG_CHANGED = "config.changed"
 
 

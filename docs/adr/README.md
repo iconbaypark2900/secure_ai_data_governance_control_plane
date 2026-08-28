@@ -14,3 +14,4 @@ costs — the last part being the one that is never reconstructible afterwards.
 | [0006](0006-no-payload-persistence.md) | Never persist payload content |
 | [0007](0007-approvals-are-scoped-capabilities.md) | Make an approval a scoped, single-use capability |
 | [0008](0008-discovery-uses-named-sources.md) | Run discovery against named, server-side sources |
+| [0009](0009-tokenisation-without-a-vault.md) | Make the token the ciphertext, so there is no vault to steal |

@@ -197,9 +197,39 @@ Six strategies, differing in what they preserve:
 | `mask` | that something was there | the default |
 | `partial` | a recognisable suffix | `**** **** **** 1111` on a receipt |
 | `hash` | joinability, keyed and irreversible | analytics, conversation continuity |
-| `tokenize` | reversibility, through a vault | pipelines that must re-identify |
+| `tokenize` | reversibility, keyed and joinable | investigations that must re-identify |
 | `synthetic` | the shape, so parsers still work | test and eval data |
 | `drop` | nothing | when presence itself is the leak |
+
+`tokenize` deserves a note, because the obvious implementation is the wrong one.
+There is **no vault** — no table mapping tokens back to values, because that
+table would be the largest concentration of sensitive data in the deployment,
+inside the component meant to reduce exactly that. Instead the token *is* the
+ciphertext: deterministic AES-256-GCM with a key that lives outside the database.
+
+```
+"Refund for jane.doe@acme.com, call 415-555-0142"
+  ↓
+"Refund for tok_AadFpWU54KX20Va67T3GYM4REVy65leB…, call tok_AeOVHifcsdRfCbtHVAka1k…"
+```
+
+Deterministic, so the same customer produces the same token across every
+decision and tokenised columns still join. Reversible only with the key, through
+an endpoint that has its own scope:
+
+```bash
+POST /v1/detokenize        {"tokens": ["tok_…"], "justification": "incident INC-4821"}
+POST /v1/detokenize/verify {"token": "tok_…", "label": "pii.email", "value": "…"}
+```
+
+`/verify` is the one to reach for first — it answers "is this token this value?"
+without disclosing anything. Every call to either is audited, including the
+failures, and the audit record holds digests rather than recovered values.
+
+And it **refuses rather than degrades**: a policy requiring `tokenize` on a
+deployment with no key configured produces a deny, not a quietly substituted
+hash. That was a real bug — the strategy silently behaved as `hash`, and nobody
+would have found out until they needed to reverse one.
 
 ### 5. Can require a person
 
@@ -407,11 +437,11 @@ doing nothing.
 control_plane/
   classification/   33-label taxonomy, 28 detectors, the scanner and its arbitration
   policy/           the policy document model, operators, and the evaluator
-  redaction/        the six strategies
+  redaction/        the six strategies, and vault-free reversible tokenisation
   audit/            the hash chain and its storage
   catalog/          assets, principals, pattern resolution, and discovery
   adapters/         Postgres, Qdrant, MCP, LibreChat
-  api/v1/           38 HTTP operations
+  api/v1/           40 HTTP operations
   pdp.py            the pipeline that ties it together
   cli.py            cpctl
 sdk/python/         the enforcement-point client
@@ -419,7 +449,7 @@ pep/reverse_proxy/  the reference enforcement point
 ui/                 the admin console (React + TypeScript)
 seed/               the reference policy set and catalog
 migrations/         Alembic, including the append-only trigger
-tests/              354 tests
+tests/              404 tests
 docs/               architecture, the policy language, and the decision records
 ```
 
@@ -459,12 +489,18 @@ them rather than generating ephemeral ones — a control plane that silently min
 a new audit key at boot would produce a chain that verifies today and fails after
 the next restart.
 
+`CP_TOKENIZATION_KEY` is required only if a policy actually uses the `tokenize`
+strategy, and has no development fallback at all: an ephemeral one would mint
+tokens that stop reversing at the next restart. If a stored policy needs it and
+it is unset, the service says so loudly at startup rather than only in the reason
+string of each denial.
+
 ---
 
 ## Testing
 
 ```bash
-make test      # 333 tests on SQLite, no external dependencies
+make test      # 383 tests on SQLite, no external dependencies
 make test-pg   # + 7 that need real Postgres
 make check     # ruff, mypy, and the suite — everything CI runs
 ```

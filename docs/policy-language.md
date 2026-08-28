@@ -252,7 +252,7 @@ obligations:
 | `mask` | `[REDACTED:pii.ssn]` | that something was there | the default |
 | `partial` | `**** **** **** 1111` | a recognisable suffix (`keep_last`) | a human must recognise their own record |
 | `hash` | `<pii.email:908fde31…>` | joinability, keyed and irreversible | analytics, conversation continuity |
-| `tokenize` | `tok_pii_a1b2…` | reversibility, through a vault | pipelines that must re-identify |
+| `tokenize` | `tok_AadFpWU54K…` | reversibility, keyed and joinable | investigations that must re-identify |
 | `synthetic` | `user402183@example.invalid` | the shape | test and eval data, so parsers still work |
 | `drop` | *(nothing)* | nothing | presence itself is the leak |
 
@@ -267,8 +267,13 @@ Rules are tried in order and the first match wins, so put the specific one first
 the taxonomy — a typo is a 422 when you write the policy, not a silent no-op at
 3am.
 
-`tokenize` without a configured vault falls back to `hash` rather than emitting a
-token nobody can reverse.
+`tokenize` needs `CP_TOKENIZATION_KEY`. Without it the decision **denies** —
+it does not fall back to `hash`, because a policy that asked for something
+reversible and received something that is not has been silently downgraded.
+Reverse a token through `POST /v1/detokenize`, which needs the `detokenize`
+scope and records every call. There is no vault behind it: the token is the
+ciphertext, so see [ADR 0009](adr/0009-tokenisation-without-a-vault.md) for what
+that buys and what it costs.
 
 ### Other types
 

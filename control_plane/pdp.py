@@ -41,6 +41,7 @@ from control_plane.models.decision import ApprovalRequest, DecisionRecord
 from control_plane.policy.engine import Decision, PolicyEngine
 from control_plane.policy.model import AccessRequest, Effect, Obligation, Principal, Resource
 from control_plane.policy.store import PolicyStore
+from control_plane.redaction.tokenization import DeterministicTokenizer
 from control_plane.redaction.transforms import RedactionResult, Redactor
 from control_plane.schemas.decision import (
     ApprovalOut,
@@ -75,6 +76,7 @@ class PolicyDecisionPoint:
         self._session = session
         self._settings = settings or get_settings()
         self._scanner = scanner or DEFAULT_SCANNER
+        self._tokenizer = DeterministicTokenizer.from_settings(self._settings)
         self._catalog = CatalogService(session)
         self._policies = PolicyStore(session)
         self._audit = AuditService(session)
@@ -153,6 +155,8 @@ class PolicyDecisionPoint:
                 latency_ms=round((time.perf_counter() - started) * 1000, 3),
                 policy_errors=[str(exc)],
             )
+
+        decision = self._guard_tokenization(decision)
 
         response = self._build_response(request, decision, findings, all_labels)
         response.approval_error = approval_error
@@ -260,7 +264,9 @@ class PolicyDecisionPoint:
             return None
 
         redactor = Redactor.from_obligations(
-            redact_obligations, key=self._settings.redaction_key_bytes()
+            redact_obligations,
+            key=self._settings.redaction_key_bytes(),
+            vault=self._tokenizer,
         )
         if isinstance(payload, str):
             return redactor.apply_to_text(payload, findings)
@@ -328,6 +334,53 @@ class PolicyDecisionPoint:
             },
         )
         return record
+
+    def _guard_tokenization(self, decision: Decision) -> Decision:
+        """Deny when a decision requires tokenisation that cannot be performed.
+
+        An obligation is a duty, not advice. If a policy permits an action only
+        on condition that certain values are replaced with reversible tokens,
+        and no tokenisation key is configured, then the condition cannot be met
+        and the permission does not apply. Emitting a hash instead would satisfy
+        the shape of the obligation and not its meaning.
+
+        This is a configuration error surfacing as a denial, which is the right
+        direction: the alternative is data leaving under a control everyone
+        believes is in place.
+        """
+        if self._tokenizer is not None or decision.effect is Effect.DENY:
+            return decision
+        requires = sorted(
+            {
+                str(obligation.get("labels") or obligation.get("classifications") or "*")
+                for obligation in (o.to_dict() for o in decision.obligations)
+                if obligation.get("type") == "redact"
+                and str(obligation.get("strategy", "")).lower() == "tokenize"
+            }
+        )
+        if not requires:
+            return decision
+
+        log.error(
+            "tokenization_unavailable",
+            determining_policy=decision.determining_policy,
+            labels=requires,
+            hint="set CP_TOKENIZATION_KEY, or change the policy's redaction strategy",
+        )
+        return replace(
+            decision,
+            effect=Effect.DENY,
+            obligations=(),
+            reason=(
+                f"{decision.reason}; denied because the decision requires the "
+                f"'tokenize' strategy for {', '.join(requires)} and no tokenisation "
+                f"key is configured, so the obligation cannot be satisfied"
+            ),
+            errors=(
+                *decision.errors,
+                "tokenization is required by policy but CP_TOKENIZATION_KEY is not set",
+            ),
+        )
 
     # --- approvals ----------------------------------------------------------- #
 

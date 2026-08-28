@@ -81,6 +81,19 @@ class Settings(BaseSettings):
         description="Key sealing the audit hash chain. Without it the chain proves "
         "only ordering, not authenticity.",
     )
+    tokenization_key: SecretStr = Field(
+        default=SecretStr(""),
+        description="Key for reversible tokenisation. The token is the ciphertext, "
+        "so this key is the entire security boundary: losing it makes every "
+        "existing token permanently irreversible. Required only if a policy "
+        "actually uses the 'tokenize' strategy.",
+    )
+    tokenization_previous_keys: str = Field(
+        default="",
+        description="Comma-separated keys retired by rotation, newest first. Used "
+        "for reading old tokens only; new ones are always minted with the current "
+        "key. Without these, rotating breaks every token issued before it.",
+    )
 
     # --- API surface ------------------------------------------------------- #
     api_prefix: str = "/v1"
@@ -138,6 +151,27 @@ class Settings(BaseSettings):
     def redaction_key_bytes(self) -> bytes:
         """The pseudonymisation key, with a dev fallback outside production."""
         return self._key_bytes("redaction_hmac_key")
+
+    @property
+    def tokenization_enabled(self) -> bool:
+        """Whether reversible tokenisation is configured.
+
+        Unlike the other keys this one has no development fallback. An ephemeral
+        tokenisation key would mint tokens that stop reversing at the next
+        restart, which is worse than refusing: the failure would show up later,
+        somewhere else, as data that cannot be recovered.
+        """
+        return bool(self.tokenization_key.get_secret_value())
+
+    def tokenization_key_bytes(self) -> bytes:
+        return self.tokenization_key.get_secret_value().encode("utf-8")
+
+    def tokenization_previous_key_bytes(self) -> tuple[bytes, ...]:
+        return tuple(
+            part.strip().encode("utf-8")
+            for part in self.tokenization_previous_keys.split(",")
+            if part.strip()
+        )
 
     def audit_key_bytes(self) -> bytes:
         """The audit-chain key, with a dev fallback outside production."""

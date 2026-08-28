@@ -25,9 +25,12 @@ secrets: ## Generate the two required keys into .env
 p=pathlib.Path('.env'); t=p.read_text(); \
 t=re.sub(r'^CP_AUDIT_HMAC_KEY=.*$$','CP_AUDIT_HMAC_KEY='+secrets.token_urlsafe(32),t,flags=re.M); \
 t=re.sub(r'^CP_REDACTION_HMAC_KEY=.*$$','CP_REDACTION_HMAC_KEY='+secrets.token_urlsafe(32),t,flags=re.M); \
+t=re.sub(r'^CP_TOKENIZATION_KEY=.*$$','CP_TOKENIZATION_KEY='+secrets.token_urlsafe(32),t,flags=re.M); \
 t=re.sub(r'^CP_BOOTSTRAP_ADMIN_KEY=.*$$','CP_BOOTSTRAP_ADMIN_KEY=cpk_'+secrets.token_hex(4)+'_'+secrets.token_urlsafe(24),t,flags=re.M); \
 p.write_text(t); print('wrote keys to .env')"
-	@echo "back up CP_AUDIT_HMAC_KEY somewhere other than the database."
+	@echo "back up CP_AUDIT_HMAC_KEY and CP_TOKENIZATION_KEY somewhere other than the database."
+	@echo "losing the audit key stops the chain verifying; losing the tokenization key"
+	@echo "makes every existing token permanently irreversible."
 
 dev-db: ## Start a local Postgres for development
 	docker run -d --name cp-postgres \

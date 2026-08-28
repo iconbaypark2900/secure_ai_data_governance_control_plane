@@ -58,6 +58,10 @@ class Scope:
     POLICY_WRITE = "policy:write"
     AUDIT_READ = "audit:read"
     APPROVALS = "approvals"
+    #: Reverse a token back to the value it replaced. The most sensitive
+    #: capability the API offers, and the reason it has its own scope: it
+    #: should be grantable to an investigator without granting anything else.
+    DETOKENIZE = "detokenize"
     ADMIN = "admin"
 
     ALL: frozenset[str] = frozenset(
@@ -69,6 +73,7 @@ class Scope:
             POLICY_WRITE,
             AUDIT_READ,
             APPROVALS,
+            DETOKENIZE,
             ADMIN,
         }
     )

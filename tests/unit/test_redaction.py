@@ -5,6 +5,10 @@ from __future__ import annotations
 import pytest
 
 from control_plane.classification.scanner import scan_structured, scan_text
+from control_plane.redaction.tokenization import (
+    DeterministicTokenizer,
+    TokenizationUnavailable,
+)
 from control_plane.redaction.transforms import (
     InMemoryTokenVault,
     RedactionRule,
@@ -49,10 +53,27 @@ class TestStrategies:
         token = next(a.replacement for a in out.applied)
         assert vault.detokenize(token) == "jane.doe@acme.com"
 
-    def test_tokenize_without_a_vault_degrades_to_a_hash(self) -> None:
-        """It must not silently emit a token nobody can reverse."""
-        out = redact(RedactionRule(("pii.email",), Strategy.TOKENIZE))
-        assert out.applied[0].replacement.startswith("<pii.email:")
+    def test_tokenize_without_a_tokenizer_refuses(self) -> None:
+        """It must not silently emit something nobody can reverse.
+
+        Substituting a hash here would satisfy the shape of the obligation and
+        not its meaning: the policy asked for a reversible token, and nobody
+        would discover the downgrade until they needed to reverse one.
+        """
+        with pytest.raises(TokenizationUnavailable, match="CP_TOKENIZATION_KEY"):
+            redact(RedactionRule(("pii.email",), Strategy.TOKENIZE))
+
+    def test_tokenize_with_a_real_tokenizer_round_trips(self) -> None:
+        tokenizer = DeterministicTokenizer(key=b"k" * 32)
+        out = redact(RedactionRule(("pii.email",), Strategy.TOKENIZE), vault=tokenizer)
+        token = out.applied[0].replacement
+        assert token.startswith("tok_")
+        assert tokenizer.detokenize(token) == "jane.doe@acme.com"
+
+    def test_other_strategies_need_no_tokenizer(self) -> None:
+        """Only tokenisation is gated; the rest work with no key configured."""
+        out = redact(RedactionRule(("pii",), Strategy.MASK))
+        assert len(out.applied) == 2
 
     def test_drop_removes_the_span(self) -> None:
         out = redact(RedactionRule(("pii.email",), Strategy.DROP))
