@@ -11,10 +11,10 @@ from __future__ import annotations
 import secrets
 from enum import StrEnum
 from functools import lru_cache
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Environment(StrEnum):
@@ -134,7 +134,15 @@ class Settings(BaseSettings):
 
     # --- API surface ------------------------------------------------------- #
     api_prefix: str = "/v1"
-    cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
+    # NoDecode because pydantic-settings JSON-decodes list-typed fields in the
+    # source layer, before any validator runs. Without it a perfectly reasonable
+    # CP_CORS_ORIGINS=http://localhost:5173 fails to parse as JSON and the
+    # process will not start -- which is exactly what the shipped .env.example
+    # set, so a first run broke on the template we handed people.
+    cors_origins: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["http://localhost:5173"],
+        description="Comma-separated origins the console may be served from.",
+    )
     docs_enabled: bool = True
     metrics_enabled: bool = Field(
         default=True,
@@ -158,8 +166,21 @@ class Settings(BaseSettings):
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _split_origins(cls, value: Any) -> Any:
+        """Accept a comma-separated string, a JSON array, or a real list.
+
+        All three turn up in practice: a shell export, a value copied from
+        another tool's config, and a Python caller passing a list.
+        """
         if isinstance(value, str):
-            return [item.strip() for item in value.split(",") if item.strip()]
+            text = value.strip()
+            if text.startswith("["):
+                import json
+
+                try:
+                    return json.loads(text)
+                except json.JSONDecodeError:
+                    pass
+            return [item.strip() for item in text.split(",") if item.strip()]
         return value
 
     @model_validator(mode="after")
