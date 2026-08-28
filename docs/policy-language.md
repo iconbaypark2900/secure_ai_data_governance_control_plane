@@ -285,13 +285,36 @@ that buys and what it costs.
 | `ttl` | `seconds` | control plane |
 | `limit` | one of `max_rows`, `max_bytes`, `max_tokens`, `max_results` | enforcement point |
 | `watermark` | `text` | enforcement point |
-| `route` | `destination` | enforcement point |
-| `notify` | `channel`, `target` | enforcement point |
 | `require_purpose` | `purposes` | enforcement point |
+
+That is the whole list, and an unknown type is a **422 when you write the
+policy** rather than a surprise at decision time. `notify` and `route` used to be
+here and were removed: nothing implemented them, so writing one produced a
+well-formed policy that denied your own traffic. See
+[ADR 0010](adr/0010-declare-only-what-is-implemented.md).
 
 Anything in the second group appears in the response's
 `unsupported_obligations`. The enforcement point must satisfy it or deny —
-`enforce(can_satisfy=["watermark"])` is how it declares that it can.
+`enforce(can_satisfy=["watermark"])` is how it declares that it can, and the
+reference proxy in `pep/reverse_proxy/` implements all three:
+
+```yaml
+obligations:
+  - {type: limit, max_tokens: 500, max_bytes: 8192}   # caps the request and the reply
+  - {type: watermark, text: INTERNAL USE ONLY}        # marks what is delivered
+  - {type: require_purpose, purposes: [support]}      # re-checked at the point of use
+```
+
+`require_purpose` deliberately duplicates what a `context.purpose` match
+condition can express. The condition is checked where the decision is made; the
+obligation is checked where the data is used, by a proxy that stops trusting the
+purpose it declared a moment earlier.
+
+One asymmetry to know about: when an enforcement point refuses because it cannot
+discharge an obligation, the control plane's decision record still says `allow` —
+that is what it decided, and the refusal happened elsewhere. So prefer the match
+condition when you want the check to appear in the audit trail, and add the
+obligation when you want it enforced in both places.
 
 ---
 

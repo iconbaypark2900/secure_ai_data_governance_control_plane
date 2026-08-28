@@ -57,9 +57,18 @@ class Settings(BaseSettings):
         description="Effect when no policy matches. Deny-by-default is the secure "
         "posture; set to 'allow' only for a permissive observation rollout.",
     )
-    decision_cache_ttl_seconds: int = 30
-    decision_cache_max_entries: int = 4096
-    max_scan_chars: int = 1_000_000
+    policy_cache_ttl_seconds: int = Field(
+        default=30,
+        description="How long the compiled policy set is cached in-process. "
+        "Bounds how long another process's policy edit stays invisible; writes "
+        "through this process invalidate it immediately.",
+    )
+    max_scan_chars: int = Field(
+        default=1_000_000,
+        description="Ceiling on how much of a payload is classified. A larger "
+        "payload is scanned up to this point and reported as truncated, so a "
+        "clean result is never mistaken for a complete one.",
+    )
     #: Fail closed if the policy engine errors. Turning this off trades safety for uptime.
     fail_closed: bool = True
 
@@ -99,6 +108,12 @@ class Settings(BaseSettings):
     api_prefix: str = "/v1"
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
     docs_enabled: bool = True
+    metrics_enabled: bool = Field(
+        default=True,
+        description="Serve Prometheus metrics at /metrics. Unauthenticated by "
+        "convention, so restrict it at the network layer rather than exposing "
+        "the port publicly.",
+    )
     #: When set, unauthenticated requests are accepted. Local development only.
     auth_disabled: bool = False
     bootstrap_admin_key: SecretStr = Field(default=SecretStr(""))

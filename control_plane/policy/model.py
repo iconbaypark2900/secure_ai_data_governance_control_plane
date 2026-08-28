@@ -23,6 +23,7 @@ the same operator mapping before evaluation, so there is one thing to test.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Annotated, Any, Literal, Self
 
@@ -70,19 +71,82 @@ ROOT_SELECTORS: frozenset[str] = frozenset(
     {"principal", "action", "resource", "context", "findings", "classifications", "env"}
 )
 
-#: Obligation types the reference enforcement points understand.
-KNOWN_OBLIGATIONS: frozenset[str] = frozenset(
-    {
-        "redact",
-        "log",
-        "notify",
-        "limit",
-        "watermark",
-        "ttl",
-        "route",
-        "require_purpose",
-        "annotate",
-    }
+
+class Executor(StrEnum):
+    """Who is responsible for carrying an obligation out."""
+
+    #: The control plane performs it and returns the result.
+    CONTROL_PLANE = "control_plane"
+    #: A duty handed to the enforcement point, which must satisfy it or treat
+    #: the decision as a deny.
+    ENFORCEMENT_POINT = "enforcement_point"
+
+
+@dataclass(frozen=True, slots=True)
+class ObligationSpec:
+    """What an obligation type means and what it needs."""
+
+    executor: Executor
+    description: str
+    #: At least one of these must be present.
+    requires_any: tuple[str, ...] = ()
+
+
+#: Every obligation type the system supports.
+#:
+#: The list is deliberately short. An obligation nothing implements is worse
+#: than no obligation at all: it validates at authoring time, reaches the
+#: enforcement point as a duty nobody can discharge, and so turns a policy
+#: someone wrote in good faith into a way to deny their own traffic. Two earlier
+#: entries -- ``notify`` and ``route`` -- were removed for exactly that reason.
+#: They need infrastructure this system does not have, and pretending otherwise
+#: was a promise in the schema that nothing behind it kept.
+OBLIGATION_SPECS: dict[str, ObligationSpec] = {
+    "redact": ObligationSpec(
+        Executor.CONTROL_PLANE,
+        "Rewrite matching values before the payload is returned.",
+        requires_any=("labels", "classifications"),
+    ),
+    "annotate": ObligationSpec(
+        Executor.CONTROL_PLANE,
+        "Attach a note to the decision, for the record rather than the payload.",
+    ),
+    "log": ObligationSpec(
+        Executor.CONTROL_PLANE,
+        "Record this decision at a raised level.",
+    ),
+    "ttl": ObligationSpec(
+        Executor.CONTROL_PLANE,
+        "How long the permitted data may be retained downstream, in seconds.",
+        requires_any=("seconds",),
+    ),
+    "limit": ObligationSpec(
+        Executor.ENFORCEMENT_POINT,
+        "Cap how much may flow: rows, bytes, tokens, or results.",
+        requires_any=("max_rows", "max_bytes", "max_tokens", "max_results"),
+    ),
+    "watermark": ObligationSpec(
+        Executor.ENFORCEMENT_POINT,
+        "Mark the delivered content so its origin survives a copy-paste.",
+        requires_any=("text",),
+    ),
+    "require_purpose": ObligationSpec(
+        Executor.ENFORCEMENT_POINT,
+        "The enforcement point must confirm its declared purpose is one of "
+        "these. Duplicates what a context.purpose match condition can express, "
+        "and deliberately so: it re-checks at the point of use rather than "
+        "trusting the purpose asserted at the point of decision.",
+        requires_any=("purposes",),
+    ),
+}
+
+#: Obligation types the system supports, in a form policies validate against.
+KNOWN_OBLIGATIONS: frozenset[str] = frozenset(OBLIGATION_SPECS)
+
+#: Those the control plane discharges itself. Derived rather than duplicated, so
+#: the decision pipeline and the policy schema cannot drift apart.
+CONTROL_PLANE_OBLIGATIONS: frozenset[str] = frozenset(
+    name for name, spec in OBLIGATION_SPECS.items() if spec.executor is Executor.CONTROL_PLANE
 )
 
 
@@ -106,38 +170,71 @@ class Obligation(BaseModel):
     @model_validator(mode="after")
     def _check_shape(self) -> Self:
         extras = self.model_extra or {}
-        if self.type == "redact":
-            labels = extras.get("labels") or extras.get("classifications")
-            if labels is None:
-                raise ValueError("a 'redact' obligation must name 'labels'")
-            names = [labels] if isinstance(labels, str) else list(labels)
-            unknown = [name for name in names if name != "*" and not taxonomy.is_known(str(name))]
-            if unknown:
-                raise ValueError(
-                    f"'redact' obligation names unknown labels: {', '.join(map(str, unknown))}"
-                )
-            strategy = str(extras.get("strategy", "mask")).lower()
-            allowed = {"mask", "partial", "hash", "tokenize", "synthetic", "drop"}
-            if strategy not in allowed:
-                raise ValueError(
-                    f"unknown redaction strategy {strategy!r}; expected one of "
-                    f"{', '.join(sorted(allowed))}"
-                )
-        if self.type == "limit" and not any(
-            key in extras for key in ("max_rows", "max_bytes", "max_tokens", "max_results")
-        ):
+
+        spec = OBLIGATION_SPECS.get(self.type)
+        if spec is None:
+            # Rejected here rather than ignored at decision time. A policy that
+            # attaches a duty nothing understands has not been written safely,
+            # and the author is the only person in a position to fix it.
             raise ValueError(
-                "a 'limit' obligation must set at least one of "
-                "max_rows, max_bytes, max_tokens, max_results"
+                f"unknown obligation type {self.type!r}; supported types are "
+                f"{', '.join(sorted(KNOWN_OBLIGATIONS))}"
             )
+
+        if spec.requires_any and not any(key in extras for key in spec.requires_any):
+            raise ValueError(
+                f"a {self.type!r} obligation must set at least one of "
+                f"{', '.join(spec.requires_any)}"
+            )
+
+        if self.type == "redact":
+            self._check_redact(extras)
+        elif self.type == "require_purpose":
+            purposes = extras.get("purposes")
+            if isinstance(purposes, str) or not isinstance(purposes, (list, tuple)):
+                raise ValueError("'require_purpose' needs 'purposes' as a list")
+            if not purposes:
+                raise ValueError("'require_purpose' with an empty list permits nothing")
+        elif self.type == "ttl":
+            seconds = extras.get("seconds")
+            if not isinstance(seconds, int) or isinstance(seconds, bool) or seconds <= 0:
+                raise ValueError("'ttl' needs 'seconds' as a positive integer")
+        elif self.type == "limit":
+            for key in ("max_rows", "max_bytes", "max_tokens", "max_results"):
+                value = extras.get(key)
+                if value is not None and (
+                    not isinstance(value, int) or isinstance(value, bool) or value < 0
+                ):
+                    raise ValueError(f"'limit.{key}' must be a non-negative integer")
         return self
+
+    @staticmethod
+    def _check_redact(extras: dict[str, Any]) -> None:
+        labels = extras.get("labels") or extras.get("classifications")
+        names = [labels] if isinstance(labels, str) else list(labels or [])
+        unknown = [name for name in names if name != "*" and not taxonomy.is_known(str(name))]
+        if unknown:
+            raise ValueError(
+                f"'redact' obligation names unknown labels: {', '.join(map(str, unknown))}"
+            )
+        strategy = str(extras.get("strategy", "mask")).lower()
+        allowed = {"mask", "partial", "hash", "tokenize", "synthetic", "drop"}
+        if strategy not in allowed:
+            raise ValueError(
+                f"unknown redaction strategy {strategy!r}; expected one of "
+                f"{', '.join(sorted(allowed))}"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return self.model_dump(mode="json")
 
     @property
-    def is_known(self) -> bool:
-        return self.type in KNOWN_OBLIGATIONS
+    def spec(self) -> ObligationSpec:
+        return OBLIGATION_SPECS[self.type]
+
+    @property
+    def executed_by_control_plane(self) -> bool:
+        return self.type in CONTROL_PLANE_OBLIGATIONS
 
 
 def _normalise_condition(raw: Any) -> dict[str, Any]:

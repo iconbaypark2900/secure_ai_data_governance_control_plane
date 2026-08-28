@@ -35,11 +35,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from control_plane.audit.chain import AuditEvent, as_utc, content_digest
 from control_plane.audit.service import AuditService
 from control_plane.catalog.service import CatalogService
-from control_plane.classification.scanner import DEFAULT_SCANNER, Finding, Scanner, ScanResult
+from control_plane.classification.scanner import Finding, Scanner, ScanResult
 from control_plane.config import Settings, get_settings
+from control_plane.metrics import get_metrics
 from control_plane.models.decision import ApprovalRequest, DecisionRecord
 from control_plane.policy.engine import Decision, PolicyEngine
-from control_plane.policy.model import AccessRequest, Effect, Obligation, Principal, Resource
+from control_plane.policy.model import (
+    CONTROL_PLANE_OBLIGATIONS,
+    AccessRequest,
+    Effect,
+    Obligation,
+    Principal,
+    Resource,
+)
 from control_plane.policy.store import PolicyStore
 from control_plane.redaction.tokenization import DeterministicTokenizer
 from control_plane.redaction.transforms import RedactionResult, Redactor
@@ -58,9 +66,11 @@ log = structlog.get_logger(__name__)
 #: How long a parked decision stays actionable before it must be re-requested.
 APPROVAL_TTL = timedelta(hours=24)
 
-#: Obligation types the control plane can carry out itself. Anything else is
-#: handed to the enforcement point, which must satisfy it or deny.
-SELF_EXECUTABLE = frozenset({"redact", "annotate", "log", "ttl"})
+#: Obligation types the control plane carries out itself. Anything else is handed
+#: to the enforcement point, which must satisfy it or deny. Imported rather than
+#: restated: two copies of this set would eventually disagree, and the direction
+#: they would disagree in is a duty silently going unenforced.
+SELF_EXECUTABLE = CONTROL_PLANE_OBLIGATIONS
 
 
 class PolicyDecisionPoint:
@@ -75,7 +85,9 @@ class PolicyDecisionPoint:
     ) -> None:
         self._session = session
         self._settings = settings or get_settings()
-        self._scanner = scanner or DEFAULT_SCANNER
+        # Built from settings rather than the module default, so CP_MAX_SCAN_CHARS
+        # is a setting that does something.
+        self._scanner = scanner or Scanner(max_chars=self._settings.max_scan_chars)
         self._tokenizer = DeterministicTokenizer.from_settings(self._settings)
         self._catalog = CatalogService(session)
         self._policies = PolicyStore(session)
@@ -185,7 +197,14 @@ class PolicyDecisionPoint:
                 parked = await self._park_for_approval(record, request, fingerprint)
                 response.approval = _approval_out(parked)
 
-        response.latency_ms = round((time.perf_counter() - started) * 1000, 3)
+        elapsed = time.perf_counter() - started
+        response.latency_ms = round(elapsed * 1000, 3)
+        get_metrics().observe_decision(
+            effect=response.effect,
+            duration_seconds=elapsed,
+            finding_labels=(f.label for f in findings),
+            redactions=(r.model_dump() for r in response.redactions),
+        )
         return response
 
     # --- pipeline stages ----------------------------------------------------- #

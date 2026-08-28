@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.config import get_settings
+from control_plane.metrics import get_metrics
 from control_plane.models.policy import PolicyRecord, PolicyVersion
 from control_plane.policy.engine import PolicyEngine
 from control_plane.policy.model import CombiningAlgorithm, Effect, Policy
@@ -180,8 +181,9 @@ class PolicyStore:
             default_effect=Effect(settings.default_effect),
             load_errors=errors,
         )
+        get_metrics().observe_policy_set(loaded=len(engine), errors=len(errors))
         if use_cache:
-            _CACHE.set(engine, settings.decision_cache_ttl_seconds)
+            _CACHE.set(engine, settings.policy_cache_ttl_seconds)
         return engine
 
     # --- writes ------------------------------------------------------------- #

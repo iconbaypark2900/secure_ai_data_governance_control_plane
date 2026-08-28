@@ -17,6 +17,14 @@ investigation into a misuse of this endpoint would need to see.
 turn the tamper-evident log into the store of sensitive values that the
 tokenisation design exists to avoid.
 
+One thing this module cannot enforce, and which matters as much as anything it
+can: the recovered values travel in the **response body**. A reverse proxy, load
+balancer, or APM agent in front of the control plane that records response
+bodies would accumulate exactly the store this whole design avoids -- quietly,
+in a component nobody thinks of as holding data. Responses here are marked
+``Cache-Control: no-store`` and ``X-Content-Sensitive``, which stops the caching
+half; the logging half is a deployment decision and is called out in the README.
+
 ``/verify`` is the operation to reach for first. It answers "is this token this
 value?" without disclosing anything, which is the real question most of the time.
 """
@@ -25,7 +33,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.api.deps import AuditDep, CallerDep, SettingsDep, require_scope
@@ -80,6 +88,18 @@ class VerifyResponse(BaseModel):
     matches: bool
 
 
+def _mark_sensitive(response: Response) -> None:
+    """Tell everything downstream not to retain this body.
+
+    Not a guarantee -- a proxy configured to log bodies will log them anyway --
+    but it removes the accidental cases, and it makes the intent legible to
+    whoever configures that proxy.
+    """
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["X-Content-Sensitive"] = "re-identified-values"
+
+
 def _tokenizer(settings: SettingsDep) -> Any:
     tokenizer = DeterministicTokenizer.from_settings(settings)
     if tokenizer is None:
@@ -104,6 +124,7 @@ async def detokenize(
     settings: SettingsDep,
     audit: AuditDep,
     caller: CallerDep,
+    response: Response,
 ) -> DetokenizeResponse:
     """Recover the original values.
 
@@ -112,6 +133,7 @@ async def detokenize(
     without saying which. The caller of a re-identification API should not be
     able to use it as an oracle for distinguishing those cases.
     """
+    _mark_sensitive(response)
     tokenizer = _tokenizer(settings)
     results = [
         DetokenizeResult(

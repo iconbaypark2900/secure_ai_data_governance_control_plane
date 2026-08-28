@@ -15,3 +15,4 @@ costs — the last part being the one that is never reconstructible afterwards.
 | [0007](0007-approvals-are-scoped-capabilities.md) | Make an approval a scoped, single-use capability |
 | [0008](0008-discovery-uses-named-sources.md) | Run discovery against named, server-side sources |
 | [0009](0009-tokenisation-without-a-vault.md) | Make the token the ciphertext, so there is no vault to steal |
+| [0010](0010-declare-only-what-is-implemented.md) | Implement an obligation or remove it; nothing in between |

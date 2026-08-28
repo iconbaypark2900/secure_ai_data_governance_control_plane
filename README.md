@@ -122,7 +122,7 @@ two is what a redaction obligation is for.
 
 ---
 
-## The six things it does
+## The seven things it does
 
 ### 1. Knows what the data is
 
@@ -226,12 +226,40 @@ POST /v1/detokenize/verify {"token": "tok_…", "label": "pii.email", "value": "
 without disclosing anything. Every call to either is audited, including the
 failures, and the audit record holds digests rather than recovered values.
 
+> **Deployment note.** Recovered values travel in the response body. Responses
+> are marked `no-store`, but a reverse proxy, load balancer, or APM agent
+> configured to record response bodies would accumulate exactly the store this
+> design avoids — quietly, in a component nobody thinks of as holding data.
+> Exclude `/v1/detokenize` from body logging.
+
 And it **refuses rather than degrades**: a policy requiring `tokenize` on a
 deployment with no key configured produces a deny, not a quietly substituted
 hash. That was a real bug — the strategy silently behaved as `hash`, and nobody
 would have found out until they needed to reverse one.
 
-### 5. Can require a person
+### 5. Attaches duties that actually bind
+
+An obligation is not advice. Seven types, and every one of them is implemented by
+something:
+
+| | executed by | |
+|---|---|---|
+| `redact` | control plane | rewrite matching values before returning them |
+| `annotate` `log` `ttl` | control plane | record, raise the log level, bound retention |
+| `limit` | enforcement point | cap tokens in, bytes and results back |
+| `watermark` | enforcement point | mark delivered content so its origin survives a paste |
+| `require_purpose` | enforcement point | re-check the declared purpose at the point of use |
+
+The list used to be nine. `notify` and `route` were removed because nothing
+implemented them — a policy author who read the schema and wrote one got a
+well-formed policy that denied their own traffic. An unknown type is now a 422
+when you write the policy, not a surprise at 3am.
+
+The SDK enforces the binding: `decision.enforce()` raises unless the caller has
+declared it can discharge whatever came back, so "allow, but watermark it" can
+never quietly become "allow".
+
+### 6. Can require a person
 
 Some things should be neither blocked nor waved through. `require_approval`
 parks the decision, and a human grants it in the console or over the API:
@@ -252,7 +280,7 @@ approval survives unspent for when that prohibition is lifted.
 Without those four properties, "approve this one export" quietly becomes
 "approve anything, for anyone holding the id".
 
-### 6. Proves it afterwards
+### 7. Proves it afterwards
 
 Every decision and every policy change is sealed into a hash chain. Each record's
 digest is an **HMAC** over its own content *and* its predecessor's digest.
@@ -441,7 +469,7 @@ control_plane/
   audit/            the hash chain and its storage
   catalog/          assets, principals, pattern resolution, and discovery
   adapters/         Postgres, Qdrant, MCP, LibreChat
-  api/v1/           40 HTTP operations
+  api/v1/           40 HTTP operations, plus /metrics
   pdp.py            the pipeline that ties it together
   cli.py            cpctl
 sdk/python/         the enforcement-point client
@@ -449,7 +477,7 @@ pep/reverse_proxy/  the reference enforcement point
 ui/                 the admin console (React + TypeScript)
 seed/               the reference policy set and catalog
 migrations/         Alembic, including the append-only trigger
-tests/              404 tests
+tests/              464 tests
 docs/               architecture, the policy language, and the decision records
 ```
 
@@ -489,6 +517,12 @@ them rather than generating ephemeral ones — a control plane that silently min
 a new audit key at boot would produce a chain that verifies today and fails after
 the next restart.
 
+Prometheus metrics are at `/metrics` — decision counts by effect, latency,
+findings by label, redactions by strategy, and policy-load health. Deliberately
+no policy key, principal, or resource label: cardinality controlled by whoever
+writes policies is a way to run a monitoring system out of memory. Per-policy
+counts live behind `/v1/decisions/stats`, which is authenticated.
+
 `CP_TOKENIZATION_KEY` is required only if a policy actually uses the `tokenize`
 strategy, and has no development fallback at all: an ephemeral one would mint
 tokens that stop reversing at the next restart. If a stored policy needs it and
@@ -500,7 +534,7 @@ string of each denial.
 ## Testing
 
 ```bash
-make test      # 383 tests on SQLite, no external dependencies
+make test      # 443 tests on SQLite, no external dependencies
 make test-pg   # + 7 that need real Postgres
 make check     # ruff, mypy, and the suite — everything CI runs
 ```

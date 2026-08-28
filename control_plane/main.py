@@ -26,6 +26,8 @@ from control_plane.auth.keys import Scope, hash_key, split_key
 from control_plane.config import Settings, get_settings
 from control_plane.db import dispose_engine, get_sessionmaker
 from control_plane.logging import configure_logging
+from control_plane.metrics import CONTENT_TYPE as METRICS_CONTENT_TYPE
+from control_plane.metrics import get_metrics
 from control_plane.models.auth import ApiKey
 from control_plane.policy.operators import PolicyError
 from control_plane.policy.store import PolicyStore
@@ -194,6 +196,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def policy_error_handler(_request: Request, exc: PolicyError) -> JSONResponse:
         """A malformed policy is the author's error, not a server fault."""
         return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+    if settings.metrics_enabled:
+
+        @app.get("/metrics", include_in_schema=False)
+        async def metrics() -> Response:
+            """Prometheus scrape endpoint.
+
+            Unauthenticated, by the convention scrapers expect. It exposes
+            decision counts and latencies, not decisions -- no principal,
+            resource, policy key, or payload appears here -- but it is still
+            operational detail, so restrict the port rather than publishing it.
+            """
+            return Response(content=get_metrics().render(), media_type=METRICS_CONTENT_TYPE)
 
     @app.get("/", include_in_schema=False)
     async def root() -> dict[str, Any]:

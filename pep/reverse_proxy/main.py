@@ -27,7 +27,7 @@ import os
 import sys
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -42,6 +42,13 @@ from control_plane_sdk import (
     AsyncControlPlaneClient,
     Decision,
     ObligationUnsatisfied,
+)
+
+from pep.reverse_proxy.obligations import (
+    SATISFIABLE,
+    apply_request_obligations,
+    apply_response_obligations,
+    check_purpose,
 )
 
 CONTROL_PLANE_URL = os.getenv("PEP_CONTROL_PLANE_URL", "http://localhost:8000")
@@ -182,13 +189,23 @@ async def chat_completions(
     if not inbound.allowed:
         return _denied(inbound, "inbound")
     try:
-        governed_prompt = inbound.enforce()
+        # Declaring what this proxy can discharge is not a formality: anything
+        # not named here turns the allow into a refusal, which is the correct
+        # outcome for a duty nobody is going to carry out.
+        governed_prompt = inbound.enforce(can_satisfy=SATISFIABLE)
     except ObligationUnsatisfied as exc:
         return _denied(Decision.denial(str(exc)), "inbound")
+
+    purpose_error = check_purpose(inbound.obligations, str(context["purpose"]))
+    if purpose_error is not None:
+        return _denied(Decision.denial(purpose_error), "inbound")
 
     upstream_body = dict(body)
     if governed_prompt is not None and governed_prompt != prompt:
         upstream_body["messages"] = _replace_messages_text(messages, governed_prompt)
+    upstream_body, request_notes = apply_request_obligations(
+        upstream_body, list(inbound.obligations)
+    )
 
     # --- call the model ---------------------------------------------------- #
     started = time.perf_counter()
@@ -224,9 +241,19 @@ async def chat_completions(
     )
     if not outbound.allowed:
         return _denied(outbound, "outbound")
-    governed_answer = outbound.enforce()
+    try:
+        governed_answer = outbound.enforce(can_satisfy=SATISFIABLE)
+    except ObligationUnsatisfied as exc:
+        return _denied(Decision.denial(str(exc)), "outbound")
     if governed_answer is not None and governed_answer != answer:
         completion = _replace_completion_text(completion, governed_answer)
+
+    # Caps and markings come from both directions, deduplicated: a watermark
+    # attached to the inbound policy describes this exchange just as much as one
+    # attached to the outbound policy, and it should mark the answer once.
+    completion, applied = apply_response_obligations(
+        completion, _merge_obligations(inbound.obligations, outbound.obligations)
+    )
 
     completion.setdefault("x_governance", {}).update(
         {
@@ -235,10 +262,27 @@ async def chat_completions(
             "inbound_redactions": len(inbound.redactions),
             "outbound_redactions": len(outbound.redactions),
             "classifications": sorted(set(inbound.classifications) | set(outbound.classifications)),
+            # What was done, not just what was decided. An obligation carried out
+            # silently is indistinguishable from one that was skipped.
+            "obligations_applied": [*request_notes, *applied.notes],
             "upstream_ms": upstream_ms,
         }
     )
     return completion
+
+
+def _merge_obligations(*groups: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Union obligations from several decisions, dropping exact duplicates."""
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for group in groups:
+        for obligation in group:
+            fingerprint = repr(sorted(obligation.items(), key=lambda kv: kv[0]))
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            merged.append(dict(obligation))
+    return merged
 
 
 def _completion_text(completion: dict[str, Any]) -> str:

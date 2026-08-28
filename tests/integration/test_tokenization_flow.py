@@ -319,3 +319,40 @@ class TestAuditIntegrity:
         pdp = PolicyDecisionPoint(session, settings=settings)
         await pdp.decide(request_for("mail jane.doe@acme.com"))
         assert (await AuditService(session, key=audit_key).verify()).valid is True
+
+
+class TestResponseHandling:
+    """Recovered values travel in the response body, which is the one place this
+    design cannot fully protect. A proxy or APM agent that records bodies would
+    accumulate exactly the store tokenisation exists to avoid."""
+
+    @pytest.fixture
+    async def wired(self, authed_client, monkeypatch):
+        from control_plane.config import reset_settings_cache
+
+        client, admin, _issue = authed_client
+        monkeypatch.setenv("CP_TOKENIZATION_KEY", "k" * 32)
+        reset_settings_cache()
+        return client, admin, DeterministicTokenizer(key=("k" * 32).encode())
+
+    async def test_the_response_is_marked_never_to_be_stored(self, wired) -> None:
+        client, admin, tokenizer = wired
+        response = await client.post(
+            "/v1/detokenize",
+            headers={"X-API-Key": admin},
+            json={
+                "tokens": [tokenizer.tokenize("pii.email", "a@b.com")],
+                "justification": "INC-1",
+            },
+        )
+        assert "no-store" in response.headers["cache-control"]
+        assert response.headers["x-content-sensitive"] == "re-identified-values"
+
+    async def test_the_marking_is_present_even_when_nothing_was_recovered(self, wired) -> None:
+        client, admin, _ = wired
+        response = await client.post(
+            "/v1/detokenize",
+            headers={"X-API-Key": admin},
+            json={"tokens": ["tok_nope"], "justification": "probing"},
+        )
+        assert "no-store" in response.headers["cache-control"]
