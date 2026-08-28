@@ -67,6 +67,7 @@ class AuditEvent(StrEnum):
     KEY_ISSUED = "apikey.issued"
     KEY_REVOKED = "apikey.revoked"
     SCAN_COMPLETED = "scan.completed"
+    CATALOG_DISCOVERED = "catalog.discovered"
     CONFIG_CHANGED = "config.changed"
 
 

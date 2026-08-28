@@ -63,6 +63,13 @@ class Settings(BaseSettings):
     #: Fail closed if the policy engine errors. Turning this off trades safety for uptime.
     fail_closed: bool = True
 
+    # --- Data sources -------------------------------------------------------- #
+    sources_file: str = Field(
+        default="sources.yaml",
+        description="Named systems the catalog can discover from. Absent is fine: "
+        "a deployment with no configured sources is the normal starting state.",
+    )
+
     # --- Cryptographic material -------------------------------------------- #
     redaction_hmac_key: SecretStr = Field(
         default=SecretStr(""),

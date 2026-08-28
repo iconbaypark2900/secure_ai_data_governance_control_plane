@@ -10,9 +10,18 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from control_plane.api.deps import AuditDep, CallerDep, CatalogDep, require_scope
+from control_plane.adapters.registry import SourceConfigError, SourceRegistry, UnknownSource
+from control_plane.api.deps import (
+    AuditDep,
+    CallerDep,
+    CatalogDep,
+    SessionDep,
+    SettingsDep,
+    require_scope,
+)
 from control_plane.audit.chain import AuditEvent
 from control_plane.auth.keys import Scope
+from control_plane.catalog.discovery import DiscoveryService
 from control_plane.classification import taxonomy
 from control_plane.classification.scanner import Scanner
 from control_plane.models.catalog import DataAsset, Principal
@@ -21,10 +30,13 @@ from control_plane.schemas.catalog import (
     AssetOut,
     ClassificationIn,
     ClassificationOut,
+    DiscoverRequest,
+    DiscoveryReportOut,
     PrincipalIn,
     PrincipalOut,
     ScanRequest,
     ScanResponse,
+    SourceOut,
 )
 
 router = APIRouter(tags=["catalog"])
@@ -277,6 +289,112 @@ async def scan_asset(
         truncated=summary["truncated"],
         persisted=body.persist,
     )
+
+
+# --- discovery -------------------------------------------------------------- #
+
+
+def _load_registry(settings: SettingsDep) -> SourceRegistry:
+    """Read the sources file per request, so an edit takes effect on save.
+
+    Discovery is not a hot path and the file is small, so there is nothing to
+    gain from caching it and something to lose: a stale registry that needs a
+    restart to pick up a source someone just added.
+    """
+    try:
+        return SourceRegistry.from_file(settings.sources_file)
+    except SourceConfigError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get(
+    "/catalog/sources",
+    response_model=list[SourceOut],
+    summary="List the systems the catalog can discover from",
+    dependencies=[Depends(require_scope(Scope.CATALOG_READ))],
+)
+async def list_sources(settings: SettingsDep) -> list[SourceOut]:
+    """Configured sources, with credentials redacted.
+
+    Credentials are configured server-side and referred to by name, so they never
+    travel in an API request body.
+    """
+    return [
+        SourceOut(
+            name=config.name,
+            adapter=config.adapter,
+            description=config.description,
+            enabled=config.enabled,
+            target=config.target,
+            owner=config.owner,
+            include=list(config.include),
+            exclude=list(config.exclude),
+            scan=config.scan,
+            max_assets=config.max_assets,
+            sample_limit=config.sample_limit,
+            min_confidence=config.min_confidence,
+        )
+        for config in _load_registry(settings).all()
+    ]
+
+
+@router.post(
+    "/catalog/sources/{name}/discover",
+    response_model=DiscoveryReportOut,
+    summary="Enumerate a source and fold what it finds into the catalog",
+    dependencies=[Depends(require_scope(Scope.CATALOG_WRITE))],
+)
+async def discover_source(
+    name: str,
+    body: DiscoverRequest,
+    session: SessionDep,
+    settings: SettingsDep,
+    caller: CallerDep,
+) -> DiscoveryReportOut:
+    """Run discovery against a configured source.
+
+    Synchronous, and bounded by ``max_assets``. A run over a large warehouse
+    should go through `cpctl catalog discover`, which is not sitting behind an
+    HTTP timeout.
+
+    Requires catalog:write even for a dry run: it opens a connection to a
+    production system using stored credentials, which is an operator action
+    whether or not it writes anything.
+    """
+    registry = _load_registry(settings)
+    try:
+        config = registry.get(name)
+    except UnknownSource as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if not config.enabled:
+        raise HTTPException(status_code=409, detail=f"source {name!r} is disabled")
+    try:
+        adapter = config.build()
+    except SourceConfigError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    try:
+        report = await DiscoveryService(session=session).run(
+            adapter,
+            source=config.name,
+            scan=config.scan if body.scan is None else body.scan,
+            dry_run=body.dry_run,
+            max_assets=body.max_assets or config.max_assets,
+            sample_limit=body.sample_limit or config.sample_limit,
+            min_confidence=(
+                config.min_confidence if body.min_confidence is None else body.min_confidence
+            ),
+            include=list(config.include if body.include is None else body.include),
+            exclude=list(config.exclude if body.exclude is None else body.exclude),
+            owner=config.owner if body.owner is None else body.owner,
+            actor=caller.identity,
+        )
+    finally:
+        closer = getattr(adapter, "aclose", None)
+        if closer is not None:
+            await closer()
+
+    return DiscoveryReportOut.model_validate(report.to_dict())
 
 
 # --- principals ------------------------------------------------------------- #

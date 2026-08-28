@@ -172,6 +172,27 @@ Appends are serialised with a Postgres transaction-scoped advisory lock. Without
 it, two concurrent appends read the same head and write two records claiming the
 same predecessor: each valid alone, and together not a history.
 
+## Filling the catalog
+
+Discovery is the one part of the system that reaches *out*. Everything else acts
+on what a caller sent; discovery connects to another system on its own account,
+which is why its credentials are configured server-side and referred to by name
+rather than passed in a request.
+
+A run does up to three things per asset: register it, import whatever the source
+already asserts (a column comment, a tag) as an ``imported`` label, and — only
+when asked — sample it and classify what comes back. Label provenance keeps those
+in their place: ``manual`` outranks ``imported`` outranks ``scan``, so re-running
+discovery cannot undo a steward's decision.
+
+Sampling is where an unregistered vector collection turns out to be full of
+customer emails, and it is also a read against production, so it is off unless
+chosen and `exclude` globs keep it away from anything it has no business
+touching. What persists as evidence is masked previews and counts.
+
+One audit record is sealed per run. See
+[ADR 0008](adr/0008-discovery-uses-named-sources.md).
+
 ## Cross-cutting choices
 
 **Deny by default, everywhere.** No policy match, an unreachable control plane, an

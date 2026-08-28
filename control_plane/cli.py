@@ -23,14 +23,22 @@ from typing import Annotated, Any, NoReturn
 import typer
 import yaml
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
 
+from control_plane.adapters.registry import (
+    SourceConfig,
+    SourceConfigError,
+    SourceRegistry,
+    UnknownSource,
+)
 from control_plane.audit.chain import AuditEvent
 from control_plane.audit.service import AuditService
 from control_plane.auth.keys import Scope, normalise_scopes
 from control_plane.auth.service import ApiKeyService
+from control_plane.catalog.discovery import DiscoveryService
 from control_plane.catalog.service import CatalogService
 from control_plane.classification.scanner import scan_structured, scan_text
 from control_plane.config import get_settings
@@ -50,10 +58,14 @@ db_app = typer.Typer(help="Schema management.", no_args_is_help=True)
 policy_app = typer.Typer(help="Author and inspect policies.", no_args_is_help=True)
 key_app = typer.Typer(help="Issue and revoke API keys.", no_args_is_help=True)
 audit_app = typer.Typer(help="Read and verify the audit chain.", no_args_is_help=True)
+catalog_app = typer.Typer(
+    help="Populate the catalog from the systems that hold data.", no_args_is_help=True
+)
 app.add_typer(db_app, name="db")
 app.add_typer(policy_app, name="policy")
 app.add_typer(key_app, name="key")
 app.add_typer(audit_app, name="audit")
+app.add_typer(catalog_app, name="catalog")
 
 console = Console()
 error_console = Console(stderr=True)
@@ -419,6 +431,173 @@ def classify(
     summary = result.summary()
     if summary["regulations"]:
         console.print(f"[dim]implicates:[/] {', '.join(summary['regulations'])}")
+
+
+# --------------------------------------------------------------------------- #
+# catalog
+# --------------------------------------------------------------------------- #
+
+
+def _registry() -> SourceRegistry:
+    try:
+        return SourceRegistry.from_file(get_settings().sources_file)
+    except SourceConfigError as exc:
+        fail(str(exc))
+
+
+@catalog_app.command("sources")
+def catalog_sources() -> None:
+    """List the configured systems the catalog can discover from."""
+    registry = _registry()
+    if not len(registry):
+        console.print(
+            f"[dim]no sources configured in "
+            f"{get_settings().sources_file}[/]\n"
+            "See seed/sources.example.yaml for the format."
+        )
+        return
+    table = Table("name", "adapter", "target", "scan", "on", "description")
+    for config in registry.all():
+        table.add_row(
+            config.name,
+            config.adapter,
+            # escape(): a target reads "[configured]", and Rich would otherwise
+            # parse the brackets as a style tag and render nothing at all.
+            escape(config.target),
+            "[green]yes[/]" if config.scan else "[dim]no[/]",
+            "[green]yes[/]" if config.enabled else "[dim]no[/]",
+            config.description,
+        )
+    console.print(table)
+
+
+@catalog_app.command("discover")
+def catalog_discover(
+    source: Annotated[
+        str | None, typer.Argument(help="A configured source name. Omit to use --adapter.")
+    ] = None,
+    adapter: Annotated[
+        str | None, typer.Option(help="Discover ad hoc: postgres or qdrant.")
+    ] = None,
+    dsn: Annotated[str | None, typer.Option(help="postgres DSN, with --adapter.")] = None,
+    base_url: Annotated[str | None, typer.Option(help="qdrant URL, with --adapter.")] = None,
+    scan: Annotated[
+        bool, typer.Option(help="Sample each asset and classify what is in it.")
+    ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show what would change. Reads nothing.")
+    ] = False,
+    include: Annotated[list[str] | None, typer.Option(help="URN glob to keep.")] = None,
+    exclude: Annotated[list[str] | None, typer.Option(help="URN glob to skip.")] = None,
+    owner: Annotated[str, typer.Option(help="Owner to record on every asset.")] = "",
+    max_assets: Annotated[int, typer.Option(help="Stop after this many.")] = 0,
+    sample_limit: Annotated[int, typer.Option(help="Records to read per asset.")] = 0,
+    min_confidence: Annotated[float, typer.Option(help="Floor for scan findings.")] = 0.0,
+) -> None:
+    """Enumerate a system and fold what it finds into the catalog.
+
+    Start with --dry-run against an unfamiliar database. Add --scan only once
+    you know what it will read: sampling reads real records, and --exclude is
+    how you keep it away from an audit table or anything under legal hold.
+    """
+    if source and adapter:
+        fail("give a configured source name or --adapter, not both")
+
+    if source:
+        try:
+            config = _registry().get(source)
+        except UnknownSource as exc:
+            fail(str(exc))
+        if not config.enabled:
+            fail(f"source {source!r} is disabled")
+    elif adapter:
+        try:
+            config = SourceConfig(name="ad-hoc", adapter=adapter, dsn=dsn, base_url=base_url)
+        except Exception as exc:
+            fail(str(exc))
+        if not config.configured:
+            fail(f"--adapter {adapter} needs {'--dsn' if adapter == 'postgres' else '--base-url'}")
+    else:
+        fail("name a configured source, or pass --adapter with its connection details")
+
+    # Explicit flags win over the source's own defaults; zero means "not given".
+    effective_scan = scan or config.scan
+    effective_include = list(include or config.include)
+    effective_exclude = list(exclude or config.exclude)
+    effective_owner = owner or config.owner
+    effective_max = max_assets or config.max_assets
+    effective_sample = sample_limit or config.sample_limit
+    effective_confidence = min_confidence or config.min_confidence
+
+    async def inner() -> None:
+        built = config.build()
+        try:
+            async with session_scope() as session:
+                report = await DiscoveryService(session=session).run(
+                    built,
+                    source=config.name,
+                    scan=effective_scan,
+                    dry_run=dry_run,
+                    max_assets=effective_max,
+                    sample_limit=effective_sample,
+                    min_confidence=effective_confidence,
+                    include=effective_include,
+                    exclude=effective_exclude,
+                    owner=effective_owner,
+                    actor="cpctl",
+                )
+        finally:
+            # Adapters that own a connection pool have to release it, whatever
+            # happened during the run.
+            closer = getattr(built, "aclose", None)
+            if closer is not None:
+                await closer()
+        _print_report(report)
+
+    run(inner())
+
+
+def _print_report(report: Any) -> None:
+    """Render a discovery report, leading with anything that needs attention."""
+    if report.errors:
+        for message in report.errors:
+            error_console.print(f"[bold red]{message}[/]")
+        raise typer.Exit(code=1)
+
+    heading = "would register" if report.dry_run else "registered"
+    console.print(
+        f"[bold]{report.source}[/] via {report.adapter}: "
+        f"{report.discovered} asset(s) discovered, "
+        f"[green]{len(report.created)} new[/], {len(report.updated)} existing"
+        + (f", [red]{len(report.failed)} failed[/]" if report.failed else "")
+    )
+    if report.truncated:
+        console.print("[yellow]capped by --max-assets; some assets were not examined[/]")
+
+    if report.classified:
+        table = Table("urn", "kind", heading, "labels", "sampled")
+        for outcome in report.classified:
+            table.add_row(
+                outcome.urn,
+                outcome.kind,
+                "[green]new[/]" if outcome.created else "[dim]existing[/]",
+                ", ".join(outcome.labels),
+                f"{outcome.records_sampled}" + (" (partial)" if outcome.partial_sample else ""),
+            )
+        console.print(table)
+
+    if report.label_counts:
+        console.print(
+            "[dim]labels:[/] " + ", ".join(f"{k} x{v}" for k, v in report.label_counts.items())
+        )
+    if report.regulations:
+        console.print(f"[dim]implicates:[/] {', '.join(report.regulations)}")
+
+    for outcome in report.failed:
+        error_console.print(f"[red]{outcome.urn}[/]: {outcome.error}")
+
+    if report.dry_run:
+        console.print("[yellow]dry run -- nothing was written and nothing was read[/]")
 
 
 # --------------------------------------------------------------------------- #

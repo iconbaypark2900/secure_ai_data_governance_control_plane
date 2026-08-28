@@ -11,12 +11,16 @@ from control_plane.classification import taxonomy
 __all__ = [
     "AssetIn",
     "AssetOut",
+    "AssetOutcomeOut",
     "ClassificationIn",
     "ClassificationOut",
+    "DiscoverRequest",
+    "DiscoveryReportOut",
     "PrincipalIn",
     "PrincipalOut",
     "ScanRequest",
     "ScanResponse",
+    "SourceOut",
 ]
 
 
@@ -126,3 +130,85 @@ class ScanResponse(BaseModel):
     scanned_chars: int = 0
     truncated: bool = False
     persisted: bool = True
+
+
+class SourceOut(BaseModel):
+    """A configured source, with its credentials redacted."""
+
+    name: str
+    adapter: str
+    description: str = ""
+    enabled: bool = True
+    target: str = Field(
+        default="",
+        description="Where it points, with any credential replaced by a marker.",
+    )
+    owner: str = ""
+    include: list[str] = Field(default_factory=list)
+    exclude: list[str] = Field(default_factory=list)
+    scan: bool = False
+    max_assets: int = 500
+    sample_limit: int = 100
+    min_confidence: float = 0.6
+
+
+class DiscoverRequest(BaseModel):
+    """Overrides for one discovery run. Anything omitted uses the source's default."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    scan: bool | None = Field(
+        default=None,
+        description="Sample each asset and classify what is in it. Reads real "
+        "records, so it is off unless the source or this request turns it on.",
+    )
+    dry_run: bool = Field(
+        default=False,
+        description="Report what would change without writing anything -- and "
+        "without reading any data either.",
+    )
+    include: list[str] | None = Field(default=None, description="URN globs to keep.")
+    exclude: list[str] | None = Field(
+        default=None,
+        description="URN globs to skip. Exclusion wins over inclusion, and it is "
+        "how a scanner is kept out of an audit table.",
+    )
+    owner: str | None = None
+    max_assets: int | None = Field(default=None, ge=1, le=50_000)
+    sample_limit: int | None = Field(default=None, ge=1, le=10_000)
+    min_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class AssetOutcomeOut(BaseModel):
+    urn: str
+    name: str = ""
+    kind: str = ""
+    created: bool = False
+    labels_imported: list[str] = Field(default_factory=list)
+    labels_scanned: list[str] = Field(default_factory=list)
+    sampled: bool = False
+    records_sampled: int = 0
+    partial_sample: bool = False
+    error: str | None = None
+
+
+class DiscoveryReportOut(BaseModel):
+    source: str
+    adapter: str
+    dry_run: bool = False
+    scanned: bool = False
+    discovered: int = 0
+    created: int = 0
+    updated: int = 0
+    failed: int = 0
+    classified: int = 0
+    label_counts: dict[str, int] = Field(default_factory=dict)
+    regulations: list[str] = Field(default_factory=list)
+    truncated: bool = Field(
+        default=False,
+        description="The source offered more assets than max_assets allowed, so "
+        "coverage is incomplete.",
+    )
+    errors: list[str] = Field(default_factory=list)
+    duration_ms: float = 0.0
+    assets: list[AssetOutcomeOut] = Field(default_factory=list)

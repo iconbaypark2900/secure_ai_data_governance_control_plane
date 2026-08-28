@@ -1,0 +1,51 @@
+# Systems the catalog can discover from.
+#
+# Copy to sources.yaml (the path in CP_SOURCES_FILE) and edit. Credentials come
+# from the environment via ${VAR}, so this file is safe to commit and the
+# secrets stay wherever the deployment already keeps them.
+#
+#   cpctl catalog sources
+#   cpctl catalog discover warehouse --dry-run
+#   cpctl catalog discover warehouse --scan
+#
+# Only adapters that can enumerate and sample can back a source: postgres and
+# qdrant. The MCP and LibreChat adapters map identifiers and build decision
+# requests -- there is nothing to enumerate without a live client session -- so
+# naming one here is rejected with an explanation.
+
+sources:
+  - name: warehouse
+    adapter: postgres
+    description: The analytics warehouse.
+    dsn: ${WAREHOUSE_DSN}
+    owner: data-platform
+    # Exclusion wins over inclusion, and it is the control that keeps a scanner
+    # out of places it has no business reading. The audit table is append-only
+    # and already governed; a secrets table should be catalogued, never sampled.
+    exclude:
+      - "pg://audit.*"
+      - "pg://pg_*.*"
+      - "pg://public.api_keys"
+    # Sampling reads real records. Turn it on deliberately, after a --dry-run.
+    scan: false
+    max_assets: 500
+    sample_limit: 100
+    min_confidence: 0.6
+
+  - name: vectors
+    adapter: qdrant
+    description: >
+      Retrieval collections. Worth scanning: a collection built from a governed
+      table inherits its sensitivity without inheriting its controls, and this
+      is usually where that shows up.
+    base_url: ${QDRANT_URL:-http://localhost:6333}
+    api_key: ${QDRANT_API_KEY}
+    owner: ml-platform
+    scan: true
+    min_confidence: 0.7
+
+  - name: legacy-reporting
+    adapter: postgres
+    description: Decommissioned. Kept for the record; not discovered.
+    dsn: ${LEGACY_DSN}
+    enabled: false

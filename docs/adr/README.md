@@ -13,3 +13,4 @@ costs — the last part being the one that is never reconstructible afterwards.
 | [0005](0005-separate-label-selectors.md) | Keep catalog labels and payload findings separate |
 | [0006](0006-no-payload-persistence.md) | Never persist payload content |
 | [0007](0007-approvals-are-scoped-capabilities.md) | Make an approval a scoped, single-use capability |
+| [0008](0008-discovery-uses-named-sources.md) | Run discovery against named, server-side sources |

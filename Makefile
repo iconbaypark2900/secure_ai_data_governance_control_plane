@@ -6,8 +6,8 @@ UV := uv
 export CP_DATABASE_URL ?= postgresql+asyncpg://control_plane:control_plane@localhost:5432/control_plane
 
 .DEFAULT_GOAL := help
-.PHONY: help install secrets dev-db serve seed demo test test-pg lint fmt typecheck check \
-        migrate migration ui ui-dev up down logs clean
+.PHONY: help install secrets dev-db serve seed discover demo test test-pg lint fmt typecheck \
+        check migrate migration ui ui-dev up down logs clean
 
 help: ## List available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -46,6 +46,9 @@ migration: ## Generate a migration: make migration m="add widgets"
 
 seed: ## Load the reference policy set and catalog
 	.venv/bin/cpctl seed
+
+discover: ## Preview discovery against a configured source: make discover s=warehouse
+	.venv/bin/cpctl catalog discover $(s) --dry-run
 
 serve: ## Run the API with reload
 	.venv/bin/cpctl serve --reload

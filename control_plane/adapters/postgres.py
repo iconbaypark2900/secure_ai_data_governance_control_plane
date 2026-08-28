@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
@@ -61,10 +61,14 @@ SYSTEM_SCHEMAS = ("pg_catalog", "information_schema", "pg_toast")
 
 _LIST_TABLES = text(
     """
-    SELECT c.relname       AS table_name,
-           n.nspname       AS schema_name,
-           c.relkind       AS kind,
-           c.reltuples     AS approx_rows,
+    SELECT c.relname          AS table_name,
+           n.nspname          AS schema_name,
+           -- ::text because relkind is PostgreSQL's internal "char" type, which
+           -- asyncpg hands back as bytes. Without the cast every view arrives as
+           -- b'v', misses the lookup, and is catalogued as a plain table -- and a
+           -- view over a PII table is not the same governance object as a table.
+           c.relkind::text    AS kind,
+           c.reltuples        AS approx_rows,
            obj_description(c.oid) AS table_comment
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -72,7 +76,12 @@ _LIST_TABLES = text(
       AND n.nspname NOT IN :system_schemas
     ORDER BY n.nspname, c.relname
     """
-).bindparams(system_schemas=SYSTEM_SCHEMAS)
+).bindparams(
+    # expanding=True renders the tuple as a parameter list. Without it the
+    # driver is handed a single placeholder for a sequence and the query fails
+    # at execution rather than at construction.
+    bindparam("system_schemas", value=SYSTEM_SCHEMAS, expanding=True)
+)
 
 _LIST_COLUMNS = text(
     """

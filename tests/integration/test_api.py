@@ -475,3 +475,138 @@ class TestApprovalRedemptionOverHttp:
         kinds = {item["event"] for item in events["items"]}
         assert {"approval.requested", "approval.granted", "approval.redeemed"} <= kinds
         assert (await client.get("/v1/audit/verify")).json()["valid"] is True
+
+
+class TestDiscoverySources:
+    """The HTTP surface for discovery. Credentials stay server-side."""
+
+    @staticmethod
+    def _configure(monkeypatch, tmp_path, document) -> None:
+        import yaml
+
+        from control_plane.config import reset_settings_cache
+
+        path = tmp_path / "sources.yaml"
+        path.write_text(yaml.safe_dump(document))
+        monkeypatch.setenv("CP_SOURCES_FILE", str(path))
+        reset_settings_cache()
+
+    async def test_no_sources_configured_is_an_empty_list(self, client, monkeypatch) -> None:
+        from control_plane.config import reset_settings_cache
+
+        monkeypatch.setenv("CP_SOURCES_FILE", "/nonexistent/sources.yaml")
+        reset_settings_cache()
+        assert (await client.get("/v1/catalog/sources")).json() == []
+
+    async def test_sources_are_listed_without_their_credentials(
+        self, client, monkeypatch, tmp_path
+    ) -> None:
+        self._configure(
+            monkeypatch,
+            tmp_path,
+            {
+                "sources": [
+                    {
+                        "name": "warehouse",
+                        "adapter": "postgres",
+                        "dsn": "postgresql+asyncpg://user:hunter2@db/warehouse",
+                        "owner": "data-platform",
+                        "exclude": ["pg://audit.*"],
+                    }
+                ]
+            },
+        )
+        body = (await client.get("/v1/catalog/sources")).json()
+        assert body[0]["name"] == "warehouse"
+        assert body[0]["target"] == "[configured]"
+        assert body[0]["exclude"] == ["pg://audit.*"]
+        assert "hunter2" not in str(body)
+
+    async def test_an_unset_variable_leaves_a_source_listable(
+        self, client, monkeypatch, tmp_path
+    ) -> None:
+        """One missing credential must not make the whole file unreadable."""
+        monkeypatch.delenv("CP_TEST_MISSING_DSN", raising=False)
+        self._configure(
+            monkeypatch,
+            tmp_path,
+            {
+                "sources": [
+                    {"name": "a", "adapter": "postgres", "dsn": "${CP_TEST_MISSING_DSN}"},
+                    {"name": "b", "adapter": "qdrant", "base_url": "http://q:6333"},
+                ]
+            },
+        )
+        body = (await client.get("/v1/catalog/sources")).json()
+        assert [s["name"] for s in body] == ["a", "b"]
+        assert body[0]["target"] == "[not configured]"
+
+    async def test_an_unknown_source_is_a_404(self, client, monkeypatch, tmp_path) -> None:
+        self._configure(monkeypatch, tmp_path, {"sources": []})
+        response = await client.post("/v1/catalog/sources/nope/discover", json={})
+        assert response.status_code == 404
+        assert "no source named" in response.json()["detail"]
+
+    async def test_a_disabled_source_is_refused(self, client, monkeypatch, tmp_path) -> None:
+        self._configure(
+            monkeypatch,
+            tmp_path,
+            {
+                "sources": [
+                    {
+                        "name": "legacy",
+                        "adapter": "postgres",
+                        "dsn": "postgresql+asyncpg://u:p@db/x",
+                        "enabled": False,
+                    }
+                ]
+            },
+        )
+        response = await client.post("/v1/catalog/sources/legacy/discover", json={})
+        assert response.status_code == 409
+        assert "disabled" in response.json()["detail"]
+
+    async def test_an_unconfigured_source_says_what_is_missing(
+        self, client, monkeypatch, tmp_path
+    ) -> None:
+        monkeypatch.delenv("CP_TEST_MISSING_DSN", raising=False)
+        self._configure(
+            monkeypatch,
+            tmp_path,
+            {"sources": [{"name": "a", "adapter": "postgres", "dsn": "${CP_TEST_MISSING_DSN}"}]},
+        )
+        response = await client.post("/v1/catalog/sources/a/discover", json={})
+        assert response.status_code == 409
+        assert "environment variable" in response.json()["detail"]
+
+    async def test_an_unreachable_source_reports_in_the_body_not_a_500(
+        self, client, monkeypatch, tmp_path
+    ) -> None:
+        """A source being down is a result to report, not a server fault."""
+        self._configure(
+            monkeypatch,
+            tmp_path,
+            {
+                "sources": [
+                    {
+                        "name": "down",
+                        "adapter": "qdrant",
+                        "base_url": "http://127.0.0.1:1",
+                        "timeout": 0.2,
+                    }
+                ]
+            },
+        )
+        response = await client.post("/v1/catalog/sources/down/discover", json={})
+        assert response.status_code == 200
+        body = response.json()
+        assert body["discovered"] == 0
+        assert body["errors"]
+
+    async def test_a_mapping_adapter_cannot_be_configured_as_a_source(
+        self, client, monkeypatch, tmp_path
+    ) -> None:
+        self._configure(monkeypatch, tmp_path, {"sources": [{"name": "t", "adapter": "mcp"}]})
+        response = await client.get("/v1/catalog/sources")
+        assert response.status_code == 500
+        assert "mapping adapter" in response.json()["detail"]

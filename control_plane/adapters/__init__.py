@@ -15,8 +15,18 @@ from control_plane.adapters.librechat import ChatTurn, LibreChatAdapter
 from control_plane.adapters.mcp_gateway import MCPAdapter, ToolCall, infer_action
 from control_plane.adapters.postgres import PostgresAdapter
 from control_plane.adapters.qdrant import QdrantAdapter
+from control_plane.adapters.registry import (
+    DISCOVERABLE_ADAPTERS,
+    MAPPING_ADAPTERS,
+    SourceConfig,
+    SourceConfigError,
+    SourceRegistry,
+    UnknownSource,
+)
 
 __all__ = [
+    "DISCOVERABLE_ADAPTERS",
+    "MAPPING_ADAPTERS",
     "Adapter",
     "AdapterError",
     "AdapterUnavailable",
@@ -27,6 +37,10 @@ __all__ = [
     "PostgresAdapter",
     "QdrantAdapter",
     "Sample",
+    "SourceConfig",
+    "SourceConfigError",
+    "SourceRegistry",
     "ToolCall",
+    "UnknownSource",
     "infer_action",
 ]

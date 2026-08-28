@@ -329,6 +329,54 @@ memorised training example, a credential a tool handed it, or a row it inferred
 from context — governing only the inbound half protects the provider, not the
 user.
 
+### Filling the catalog
+
+A control plane only governs what it knows about, and a catalog maintained by
+hand is a catalog with holes in it. Point it at the systems that hold data:
+
+```bash
+cpctl catalog sources                              # what is configured
+cpctl catalog discover warehouse --dry-run         # reads nothing, writes nothing
+cpctl catalog discover warehouse --scan            # sample and classify
+```
+
+```
+warehouse via postgres: 4 asset(s) discovered, 4 new, 0 existing
+
+  urn                          kind   registered  labels                                       sampled
+  pg://clinical.encounters     table  new         phi.icd10, phi.mrn, pii.dob                  1
+  pg://public.customers        table  new         pii.address, pii.email, pii.phone, pii.ssn   2
+  pg://public.payment_methods  table  new         pci.card_number, pci.iban                    1
+
+  implicates: CCPA, GDPR, GLBA, HIPAA, PCI-DSS
+```
+
+Two of those labels came from column names and comments — no data read at all.
+`pii.dob` on the clinical table came from *sampling*: it was sitting in a
+free-text `notes` column, where no schema inspection would have found it.
+
+Sources are configured server-side and referred to by name, so a connection
+string never travels in an API request body. Secrets interpolate from the
+environment, so the file is safe to commit:
+
+```yaml
+sources:
+  - name: warehouse
+    adapter: postgres
+    dsn: ${WAREHOUSE_DSN}
+    exclude: ["pg://audit.*", "pg://public.api_keys"]   # never sampled
+    scan: false                                          # opt in deliberately
+```
+
+`exclude` beats `include`, because a control that a broader rule can override is
+not a control. Sampling stores masked previews and counts as evidence — never a
+value — so profiling an asset does not turn the catalog into a copy of it. One
+audit record is sealed per run, not per asset: cataloguing four hundred tables is
+one operator action.
+
+The same thing over HTTP: `GET /v1/catalog/sources`,
+`POST /v1/catalog/sources/{name}/discover`.
+
 ### Adapters
 
 `control_plane/adapters/` connects the catalog to systems that hold data. They
@@ -346,6 +394,11 @@ disagree.
 - **LibreChat** — maps users and agents to principals, uploads to assets, and
   outbound messages to `infer` decisions
 
+The first two can back a discovery source. The last two map identifiers and build
+decision requests — there is nothing to enumerate without a live client session —
+so naming one as a source is refused with that explanation rather than quietly
+doing nothing.
+
 ---
 
 ## Repository layout
@@ -356,9 +409,9 @@ control_plane/
   policy/           the policy document model, operators, and the evaluator
   redaction/        the six strategies
   audit/            the hash chain and its storage
-  catalog/          assets, principals, pattern resolution
+  catalog/          assets, principals, pattern resolution, and discovery
   adapters/         Postgres, Qdrant, MCP, LibreChat
-  api/v1/           36 HTTP operations
+  api/v1/           38 HTTP operations
   pdp.py            the pipeline that ties it together
   cli.py            cpctl
 sdk/python/         the enforcement-point client
@@ -366,7 +419,7 @@ pep/reverse_proxy/  the reference enforcement point
 ui/                 the admin console (React + TypeScript)
 seed/               the reference policy set and catalog
 migrations/         Alembic, including the append-only trigger
-tests/              280 tests
+tests/              354 tests
 docs/               architecture, the policy language, and the decision records
 ```
 
@@ -380,6 +433,9 @@ cpctl decide --principal agent:support_bot --action read \
 cpctl classify -                      # scan stdin
 cpctl policy validate seed/policies.yaml   # what CI runs on a policy PR
 cpctl policy sync seed/policies.yaml       # GitOps-style deployment
+cpctl catalog sources                      # configured systems to discover from
+cpctl catalog discover warehouse --dry-run # reads nothing, writes nothing
+cpctl catalog discover warehouse --scan    # sample and classify
 cpctl key issue --name gateway --scope decide --scope catalog:read
 cpctl audit verify
 ```
@@ -408,14 +464,16 @@ the next restart.
 ## Testing
 
 ```bash
-make test      # 273 tests on SQLite, no external dependencies
+make test      # 333 tests on SQLite, no external dependencies
 make test-pg   # + 7 that need real Postgres
 make check     # ruff, mypy, and the suite — everything CI runs
 ```
 
 The Postgres-only tests cover what SQLite cannot demonstrate: the advisory lock
 that keeps twelve concurrent audit writers producing one unbroken chain, the
-append-only trigger, and JSONB containment.
+append-only trigger, JSONB containment, and the Postgres adapter's own queries —
+which is where two real bugs were found, because query construction is not
+something a fake can check.
 
 `tests/integration/test_seed_policies.py` tests the *shipped policy set* against
 its own descriptions. A reference policy set that reads well and denies the wrong
