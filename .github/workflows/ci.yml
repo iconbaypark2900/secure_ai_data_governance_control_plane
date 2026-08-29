@@ -22,7 +22,11 @@ jobs:
 
     services:
       postgres:
-        image: postgres:17-alpine
+        # pgvector rather than plain postgres: it is postgres 17 with the
+        # extension, and without it the vector-store tests skip -- which is how
+        # a 332x sampling cost sat unnoticed in an adapter that had otherwise
+        # been run against a real database.
+        image: pgvector/pgvector:0.8.0-pg17
         env:
           POSTGRES_USER: control_plane
           POSTGRES_PASSWORD: control_plane

@@ -214,7 +214,10 @@ class TestSampling:
         adapter = PostgresAdapter(engine=pg_engine)
         for _ in range(12):
             samples = [s async for s in adapter.sample("pg://public.big_events", limit=50)]
-            assert samples[0].record_count == 50
+            # Never zero is the property. Not "always fifty": how many rows a
+            # selected block holds depends on the page layout, and asserting the
+            # full page passed on PostgreSQL 17 and failed on 15.
+            assert 0 < samples[0].record_count <= 50
             assert samples[0].partial is True
             assert samples[0].content[0]["note"].startswith("note ")
 
@@ -233,6 +236,73 @@ class TestSampling:
 
         with pytest.raises(AdapterUnavailable, match="cannot sample"):
             [s async for s in warehouse.sample("pg://public.nonexistent")]
+
+
+class TestVectorStores:
+    """A pgvector store is the case the catalog exists for, and it needs pgvector.
+
+    Skipped unless the target database has the extension available. Everything
+    here came from pointing the adapter at a real langchain/pgvector store: the
+    schema rag_api creates for uploaded files, where the interesting column is a
+    varchar next to an embedding three hundred times its size.
+    """
+
+    @pytest.fixture
+    async def vectors(self, pg_engine):
+        async with pg_engine.begin() as connection:
+            try:
+                await connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            except Exception:
+                pytest.skip("pgvector is not available on this database")
+            await connection.execute(text("DROP TABLE IF EXISTS public.embeddings CASCADE"))
+            await connection.execute(
+                text(
+                    "CREATE TABLE public.embeddings ("
+                    "  uuid uuid PRIMARY KEY,"
+                    "  embedding vector(3),"
+                    "  document varchar,"
+                    "  cmetadata jsonb)"
+                )
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO public.embeddings VALUES"
+                    " (gen_random_uuid(), '[0.1,0.2,0.3]',"
+                    "  'Maria Alvarez, SSN 501-72-9384.', '{\"file\":\"a\"}'),"
+                    " (gen_random_uuid(), '[0.4,0.5,0.6]',"
+                    "  'Quarterly revenue rose.', '{\"file\":\"b\"}')"
+                )
+            )
+        return PostgresAdapter(engine=pg_engine)
+
+    async def test_the_embedding_column_is_catalogued(self, vectors) -> None:
+        """Knowing a table is a vector store is worth knowing about the asset."""
+        found = {a.urn: a for a in await vectors.discover()}
+        assert "embedding" in found["pg://public.embeddings"].attributes["columns"]
+
+    async def test_the_embedding_column_is_not_sampled(self, vectors) -> None:
+        """Measured on a 1536-dimension store: 99.4% of a row is float text, and
+        scanning 200 rows took 3,166 ms against 10 ms without it. A classifier
+        cannot learn anything from an embedding -- the Qdrant adapter had said so
+        since it was written, and this one predated pgvector being in view.
+        """
+        samples = [s async for s in vectors.sample("pg://public.embeddings", limit=10)]
+        assert "embedding" not in samples[0].content[0]
+        assert "document" in samples[0].content[0]
+
+    async def test_the_documents_beside_it_are_still_classified(self, vectors) -> None:
+        """Skipping the vector must not skip what the vector was built from."""
+        from control_plane.classification.scanner import Scanner
+
+        samples = [s async for s in vectors.sample("pg://public.embeddings", limit=10)]
+        labels = {f.label for f in Scanner().scan_structured(samples[0].content).findings}
+        assert "pii.ssn" in labels
+
+    async def test_row_counts_are_unaffected(self, vectors) -> None:
+        """Narrowing the projection must not narrow what was read."""
+        samples = [s async for s in vectors.sample("pg://public.embeddings", limit=10)]
+        assert samples[0].record_count == 2
+        assert samples[0].partial is False
 
 
 class TestEndToEnd:

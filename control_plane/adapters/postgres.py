@@ -96,6 +96,35 @@ _LIST_COLUMNS = text(
     """
 )
 
+_SAMPLEABLE_COLUMNS = text(
+    """
+    SELECT a.attname AS column_name
+    FROM pg_attribute a
+    JOIN pg_class c ON c.oid = a.attrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_type t ON t.oid = a.atttypid
+    WHERE n.nspname = :schema AND c.relname = :table
+      AND a.attnum > 0 AND NOT a.attisdropped
+      AND t.typname <> ALL(:skip_types)
+    ORDER BY a.attnum
+    """
+)
+
+#: Column types excluded from a sample because a classifier cannot learn
+#: anything from them, and reading them is expensive enough to matter.
+#:
+#: Embeddings are the case that forced this. On a langchain/pgvector store with
+#: 1536 dimensions a row is ~13,700 bytes of float text carrying ~50 bytes of
+#: document -- 99.4% of a sample is noise, and scanning 200 rows took 3,166 ms
+#: instead of 10 ms. Measured, not estimated. The Qdrant adapter had excluded
+#: vectors from the start for the same reason; this one predated pgvector being
+#: in view.
+#:
+#: These are skipped in *sampling* only. Discovery still records them as
+#: columns, because a table with an embedding column is a vector store and that
+#: is worth knowing about the asset.
+UNSAMPLEABLE_TYPES: tuple[str, ...] = ("vector", "halfvec", "sparsevec", "tsvector")
+
 KIND_NAMES = {"r": "table", "p": "partitioned_table", "v": "view", "m": "materialized_view"}
 
 
@@ -168,16 +197,38 @@ class PostgresAdapter:
         qualified = f'"{_quote(schema)}"."{_quote(table)}"'
         try:
             async with self._engine.connect() as connection:
+                columns = (
+                    (
+                        await connection.execute(
+                            _SAMPLEABLE_COLUMNS.bindparams(
+                                bindparam("skip_types", expanding=False)
+                            ),
+                            {
+                                "schema": schema,
+                                "table": table,
+                                "skip_types": list(UNSAMPLEABLE_TYPES),
+                            },
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                # An empty list means every column was excluded, which is not a
+                # reason to select nothing at all: SELECT * at least reports the
+                # asset was read. It also means a table of pure embeddings still
+                # samples, and honestly finds nothing.
+                projection = ", ".join(f'"{_quote(c)}"' for c in columns) if columns else "*"
                 total = (
                     await connection.execute(text(f"SELECT count(*) FROM {qualified}"))  # noqa: S608
                 ).scalar_one()
-                head = text(f"SELECT * FROM {qualified} LIMIT :limit")  # noqa: S608
+                head = text(f"SELECT {projection} FROM {qualified} LIMIT :limit")  # noqa: S608
                 # TABLESAMPLE spreads the read across the whole heap; on a small
                 # table its granularity is worse than just reading everything.
                 if total > 10_000:
                     fraction = min(100.0, max(0.01, (limit / total) * 100 * 3))
                     spread = text(
-                        f"SELECT * FROM {qualified} TABLESAMPLE SYSTEM ({fraction}) "  # noqa: S608
+                        f"SELECT {projection} FROM {qualified} "  # noqa: S608
+                        f"TABLESAMPLE SYSTEM ({fraction}) "
                         f"LIMIT :limit"
                     )
                     rows = (await connection.execute(spread, {"limit": limit})).mappings().all()

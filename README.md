@@ -664,7 +664,7 @@ pep/mcp_proxy/      the second one (MCP tool calls)
 ui/                 the admin console (React + TypeScript)
 seed/               the reference policy set and catalog
 migrations/         Alembic, including the append-only trigger
-tests/              706 tests
+tests/              710 tests
 docs/               architecture, the policy language, and the decision records
 ```
 
