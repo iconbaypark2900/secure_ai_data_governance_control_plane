@@ -146,6 +146,53 @@ class TestReconciliation:
         assert unreported["total"] == 2
         assert all(item["outcome"] is None for item in unreported["items"])
 
+    async def test_a_denial_is_never_unreported(self, decided) -> None:
+        """It permitted nothing, so nobody owes an account of it.
+
+        This filter answers one question -- has an enforcement point gone quiet?
+        -- and a denial can only ever answer it wrongly. It can never be
+        reported, so it would sit in the results permanently, and denials are
+        common enough in real traffic to bury the permitted actions that are the
+        entire point of looking.
+
+        The case existed before this test and passed, because no fixture here
+        had ever produced a denial. Two other test files worked around it by
+        adding effect == "allow" to their own queries, which is the tell: when
+        the tests for a feature have to correct its filter, the filter is wrong.
+        """
+        client, _ = decided
+        # Nothing matches this action, so deny-by-default applies.
+        denied = await client.post("/v1/decide", json=decide_body(action="delete"))
+        assert denied.json()["effect"] == "deny"
+
+        unreported = (await client.get("/v1/decisions?outcome=unreported")).json()
+        assert all(item["effect"] == "allow" for item in unreported["items"])
+        assert unreported["total"] == 1
+
+    async def test_a_denial_is_still_listed_by_effect(self, decided) -> None:
+        """Excluded from one filter, not hidden from the log."""
+        client, _ = decided
+        await client.post("/v1/decide", json=decide_body(action="delete"))
+        denials = (await client.get("/v1/decisions?effect=deny")).json()
+        assert denials["total"] == 1
+
+    async def test_the_outcome_buckets_sum_to_the_permitted_count(self, decided) -> None:
+        """A number an operator can check, rather than one describing the taxonomy.
+
+        by_outcome counted every decision, so its "unreported" bucket was mostly
+        denials -- while permitted_but_not_enforced beside it in the same
+        response was correctly scoped to allows. Two numbers in one payload
+        disagreeing about what counts.
+        """
+        client, decision_id = decided
+        await client.post("/v1/decide", json=decide_body())
+        await client.post("/v1/decide", json=decide_body(action="delete"))
+        await client.post(f"/v1/decisions/{decision_id}/outcome", json={"outcome": "enforced"})
+
+        stats = (await client.get("/v1/decisions/stats")).json()
+        assert sum(stats["by_outcome"].values()) == stats["by_effect"]["allow"]
+        assert stats["by_outcome"] == {"enforced": 1, "unreported": 1}
+
     async def test_filtering_by_a_reported_outcome(self, decided) -> None:
         client, decision_id = decided
         await client.post(f"/v1/decisions/{decision_id}/outcome", json={"outcome": "enforced"})

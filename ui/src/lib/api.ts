@@ -220,6 +220,8 @@ export interface TraceEntry {
 export interface DecisionStats {
   total: number; avg_latency_ms: number; total_redactions: number;
   by_effect: Record<string, number>;
+  /** Over permitted decisions only, so the buckets sum to by_effect.allow.
+   *  A denial has no action for anyone to account for. */
   by_outcome: Record<string, number>;
   /** Permitted by policy, then not carried out downstream. */
   permitted_but_not_enforced: number;

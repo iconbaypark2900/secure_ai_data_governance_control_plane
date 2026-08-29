@@ -281,23 +281,28 @@ describe("outcomes are reported", () => {
     await expect(client.enforcing(decision, () => "done")).resolves.toBe("done");
   });
 
-  it("mirrors Python by NOT reporting when enforcing() cannot satisfy a duty", async () => {
-    // Deliberately pinned, and worth flagging rather than presenting as design.
-    // client.enforce() reports "refused" when an obligation cannot be
-    // discharged; client.enforcing() throws from decision.enforce() before its
-    // try block and reports nothing, so the decision stays *unreported* -- the
-    // state the outcome work exists to make visible. The Python SDK behaves the
-    // same way, and a port that quietly diverged would be the worse of the two
-    // problems. If Python changes, change this with it.
+  it("reports refused when enforcing() cannot discharge a duty", async () => {
+    // The same refusal, arriving before the work rather than during it. This
+    // used to report nothing -- enforce() reported it and enforcing() did not --
+    // so a duty nobody could carry out left the decision *unreported*, which is
+    // the state that list exists to surface, missing the case most worth
+    // surfacing. Fixed in both clients together.
     const { fetch, calls } = stubFetch({
-      responses: [json({ ...ALLOW, obligations: [{ type: "watermark" }] })],
+      responses: [
+        json({ ...ALLOW, obligations: [{ type: "watermark" }, { type: "log" }] }),
+        json({}),
+      ],
     });
     const client = new ControlPlaneClient("http://cp.test", { fetch });
     const decision = await client.decide({ principalId: "a", action: "read" });
-    await expect(client.enforcing(decision, () => "x")).rejects.toBeInstanceOf(
-      ObligationUnsatisfied,
-    );
-    expect(calls).toHaveLength(1);
+    const work = vi.fn();
+    await expect(client.enforcing(decision, work)).rejects.toBeInstanceOf(ObligationUnsatisfied);
+    expect(work).not.toHaveBeenCalled();
+    expect(calls[1]?.body).toMatchObject({
+      outcome: Outcome.REFUSED,
+      discharged: ["log"],
+      undischarged: ["watermark"],
+    });
   });
 
   it("reports nothing for a decision that was never recorded", async () => {

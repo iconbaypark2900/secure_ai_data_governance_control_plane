@@ -475,3 +475,60 @@ class TestOutcomeReporting:
         )
         assert decision.outstanding() == ["route"]
         assert decision.outstanding(["route"]) == []
+
+    async def test_enforcing_reports_an_obligation_it_cannot_discharge(self) -> None:
+        """The same refusal, arriving before the work rather than during it.
+
+        enforce() reported this and enforcing() did not, so a duty nobody could
+        carry out left the decision unreported -- the state that list exists to
+        surface, missing the case most worth surfacing.
+        """
+        posts: list[tuple[str, dict]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            import json as _json
+
+            if request.url.path.endswith("/outcome"):
+                posts.append((request.url.path, _json.loads(request.content)))
+                return httpx.Response(204)
+            return httpx.Response(
+                200,
+                json={
+                    **ALLOW_BODY,
+                    "decision_id": "d_1",
+                    "obligations": [{"type": "watermark"}, {"type": "log"}],
+                },
+            )
+
+        client = client_with(handler)
+        decision = await client.decide(principal_id="a", action="read")
+        with pytest.raises(ObligationUnsatisfied):
+            async with client.enforcing(decision):
+                pytest.fail("the block must not run")
+
+        assert len(posts) == 1
+        _, body = posts[0]
+        assert body["outcome"] == "refused"
+        assert body["discharged"] == ["log"]
+        assert body["undischarged"] == ["watermark"]
+
+    async def test_enforcing_reports_nothing_for_a_denial(self) -> None:
+        """It permitted nothing; the record already says it was refused."""
+        posts: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            import json as _json
+
+            if request.url.path.endswith("/outcome"):
+                posts.append(_json.loads(request.content))
+                return httpx.Response(204)
+            return httpx.Response(
+                200, json={"effect": "deny", "reason": "no", "decision_id": "d_2"}
+            )
+
+        client = client_with(handler)
+        decision = await client.decide(principal_id="a", action="read")
+        with pytest.raises(DecisionDenied):
+            async with client.enforcing(decision):
+                pytest.fail("the block must not run")
+        assert posts == []

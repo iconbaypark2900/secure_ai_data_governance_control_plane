@@ -526,9 +526,25 @@ class AsyncControlPlaneClient(_ClientBase):
 
         An exception escaping the block is reported as a refusal, because from
         the control plane's side that is what it is: permitted, and it did not
-        happen.
+        happen. So is an obligation this point cannot discharge, which is the
+        same refusal arriving earlier -- reporting one and not the other left
+        the decision *unreported*, and a duty nobody could carry out is exactly
+        what an operator is scanning that list for.
+
+        A denial is not reported: nothing was permitted, so there is no action
+        to account for, and the record already says it was refused.
         """
-        payload = decision.enforce(can_satisfy=can_satisfy)
+        try:
+            payload = decision.enforce(can_satisfy=can_satisfy)
+        except ObligationUnsatisfied as exc:
+            await self.report_outcome(
+                decision,
+                Outcome.REFUSED,
+                reason=str(exc),
+                discharged=[t for t in decision.obligation_types() if t not in exc.obligations],
+                undischarged=exc.obligations,
+            )
+            raise
         try:
             yield payload
         except Exception as exc:

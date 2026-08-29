@@ -35,6 +35,11 @@ from control_plane.schemas.decision import (
     SimulateResponse,
 )
 
+#: The only effect that leaves an action for someone to account for. A deny
+#: permitted nothing; a require_approval has not happened yet, and redeeming the
+#: approval produces a fresh decision which is the one that gets reported.
+ACTIONABLE_EFFECT = "allow"
+
 router = APIRouter(tags=["decisions"])
 
 
@@ -174,8 +179,9 @@ async def list_decisions(
     outcome: Annotated[
         str | None,
         Query(
-            description="enforced, refused, partial, or 'unreported' for decisions "
-            "no enforcement point has accounted for."
+            description="enforced, refused, partial, or 'unreported' for permitted "
+            "actions no enforcement point has accounted for. Denials are never "
+            "'unreported': nothing was permitted, so there is nothing to report."
         ),
     ] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
@@ -193,7 +199,18 @@ async def list_decisions(
     if outcome == "unreported":
         # The most interesting filter: a point that quietly stops reporting is a
         # point that quietly stopped being observed.
-        statement = statement.where(DecisionRecord.outcome.is_(None))
+        #
+        # Restricted to decisions that permitted something, which is not a
+        # detail. A deny has no action for anyone to account for, so it can
+        # never be reported and would sit here permanently -- and denials are
+        # common, so the one filter meant to surface a silent enforcement point
+        # would be mostly noise that never resolves. A parked decision is the
+        # same: nothing has happened yet, and redeeming the approval produces a
+        # new decision that is the one to account for.
+        statement = statement.where(
+            DecisionRecord.effect == ACTIONABLE_EFFECT,
+            DecisionRecord.outcome.is_(None),
+        )
     elif outcome:
         statement = statement.where(DecisionRecord.outcome == outcome)
 
@@ -239,9 +256,15 @@ async def decision_stats(session: SessionDep) -> dict[str, Any]:
             )
         )
     ).one()
+    # Scoped to permitted actions, like the listing filter and for the same
+    # reason: a deny has nothing to account for, so counting it as "unreported"
+    # describes the taxonomy rather than the fleet. Scoped this way the buckets
+    # sum to the allow count, which is a number an operator can check.
     by_outcome = (
         await session.execute(
-            select(DecisionRecord.outcome, func.count()).group_by(DecisionRecord.outcome)
+            select(DecisionRecord.outcome, func.count())
+            .where(DecisionRecord.effect == ACTIONABLE_EFFECT)
+            .group_by(DecisionRecord.outcome)
         )
     ).all()
     # "Permitted, then refused downstream" -- the reconciliation that was not

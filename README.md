@@ -338,6 +338,13 @@ to report something false either way, and the useful signal disappears.
 **Unreported is a state, not a default.** Silence is not read as success: a point
 that quietly stops reporting is one that quietly stopped being observed.
 
+It counts only decisions that permitted something. A denial has no action for
+anyone to account for, so it can never be reported and would sit in that list
+permanently — and denials are common, so the one query meant to surface a silent
+enforcement point would have been mostly noise that never resolves. The tell was
+that two test files had added `effect == "allow"` to their own queries to work
+around it: when the tests for a feature correct its filter, the filter is wrong.
+
 The SDK does it for you, and does it at the right moment:
 
 ```python
@@ -691,7 +698,7 @@ pep/mcp_proxy/      the second one (MCP tool calls)
 ui/                 the admin console (React + TypeScript)
 seed/               the reference policy set and catalog
 migrations/         Alembic, including the append-only trigger
-tests/              710 tests
+tests/              723 tests
 docs/               architecture, the policy language, and the decision records
 ```
 
@@ -748,7 +755,7 @@ string of each denial.
 ## Testing
 
 ```bash
-make test        # 666 tests on SQLite, no external dependencies
+make test        # 679 tests on SQLite, no external dependencies
 make test-pg     # + those that need real Postgres
 make test-qdrant # + those that need a real Qdrant
 make check       # ruff, mypy, and the suite — everything CI runs

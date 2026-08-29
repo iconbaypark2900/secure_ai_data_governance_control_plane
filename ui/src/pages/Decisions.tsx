@@ -51,7 +51,7 @@ export function Decisions({
               <option value="enforced">enforced</option>
               <option value="refused">refused downstream</option>
               <option value="partial">partial</option>
-              <option value="unreported">unreported</option>
+              <option value="unreported">unreported (permitted, unaccounted for)</option>
             </select>
           </div>
         </div>

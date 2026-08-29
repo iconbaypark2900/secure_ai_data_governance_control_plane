@@ -269,20 +269,18 @@ class TestOutcomesAreReported:
         directions = {r.context.get("direction"): r.outcome for r in rows}
         assert directions == {"invoke": "enforced", "result": "enforced"}
 
-    async def test_no_permitted_action_is_left_unreported(self, proxy, app_session) -> None:
-        """The check the outcome work exists for, applied to this enforcement point."""
-        from sqlalchemy import func, select
+    async def test_no_permitted_action_is_left_unreported(self, proxy, client) -> None:
+        """The check the outcome work exists for, applied to this enforcement point.
 
-        from control_plane.models.decision import DecisionRecord
-
+        Asked through the API rather than the table. This used to add
+        ``effect == "allow"`` to its own query, because the endpoint's
+        ``unreported`` filter did not -- a workaround in the tests for a feature
+        is a report that the feature is wrong, and it is fixed rather than
+        carried.
+        """
         await _call(proxy, "read_notes")
         await _call(proxy, "read_patient_file", {"id": "42"})
         await _call(proxy, "delete_record", {"id": "1"})
-        unreported = (
-            await app_session.execute(
-                select(func.count())
-                .select_from(DecisionRecord)
-                .where(DecisionRecord.effect == "allow", DecisionRecord.outcome.is_(None))
-            )
-        ).scalar_one()
-        assert unreported == 0
+
+        listing = (await client.get("/v1/decisions?outcome=unreported")).json()
+        assert listing["total"] == 0, listing["items"]

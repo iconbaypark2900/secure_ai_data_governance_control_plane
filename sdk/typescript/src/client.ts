@@ -199,13 +199,33 @@ export class ControlPlaneClient {
    *
    * A throw from the callback is reported as a refusal, because from the
    * control plane's side that is what it is: permitted, and it did not happen.
+   * So is an obligation this point cannot discharge, which is the same refusal
+   * arriving earlier -- reporting one and not the other left the decision
+   * *unreported*, and a duty nobody could carry out is exactly what an operator
+   * is scanning that list for.
+   *
+   * A denial is not reported: nothing was permitted, so there is no action to
+   * account for, and the record already says it was refused.
    */
   async enforcing<T>(
     decision: Decision,
     work: (payload: unknown) => T | Promise<T>,
     options: { canSatisfy?: Iterable<string> } = {},
   ): Promise<T> {
-    const payload = decision.enforce(options.canSatisfy ?? []);
+    let payload: unknown;
+    try {
+      payload = decision.enforce(options.canSatisfy ?? []);
+    } catch (error) {
+      if (error instanceof ObligationUnsatisfied) {
+        const missing = new Set(error.obligations);
+        await this.reportOutcome(decision, Outcome.REFUSED, {
+          reason: error.message,
+          discharged: decision.obligationTypes().filter((type) => !missing.has(type)),
+          undischarged: error.obligations,
+        });
+      }
+      throw error;
+    }
     let result: T;
     try {
       result = await work(payload);
