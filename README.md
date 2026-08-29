@@ -467,6 +467,32 @@ Three behaviours there are requirements, not conveniences:
 - **Content decisions are never cached.** The payload is part of what was decided.
   Only the pure authorisation question — no payload — is cacheable.
 
+**TypeScript too**, for enforcement points that are not Python — a gateway
+middleware, a LibreChat hook, an Express route:
+
+```ts
+const decision = await cp.decide({
+  principalId: "agent://support-bot", principalType: "agent",
+  action: "infer", payload: prompt,
+});
+
+await cp.enforcing(decision, async (payload) => sendUpstream(payload), {
+  canSatisfy: ["route"],
+});   // reported enforced here, or refused if the block threw
+```
+
+Python's context manager becomes a callback, which turns out to be the stronger
+shape: there is no way to obtain the payload without also handing over the work
+that uses it, so the reporting cannot be skipped by accident.
+
+The two clients are held to the same wire contract by a fixture generated from
+the Python SDK's own body builder — `tools/generate_sdk_contract.py` — and CI
+regenerates it and fails if it moved. Two clients that disagree about the request
+body get different decisions out of the same policy, and the one that gets used
+less is the one that stays wrong. Writing the second implementation is also what
+found a cache-key bug in the first: `{"external": true}` and `{"external": "True"}`
+were the same key, so the second caller received the first one's decision.
+
 ### The reference enforcement point
 
 `pep/reverse_proxy/` is a governing reverse proxy for OpenAI-compatible chat
@@ -659,6 +685,7 @@ control_plane/
   pdp.py            the pipeline that ties it together
   cli.py            cpctl
 sdk/python/         the enforcement-point client
+sdk/typescript/     the same client, for JS runtimes
 pep/reverse_proxy/  the reference enforcement point (chat completions)
 pep/mcp_proxy/      the second one (MCP tool calls)
 ui/                 the admin console (React + TypeScript)

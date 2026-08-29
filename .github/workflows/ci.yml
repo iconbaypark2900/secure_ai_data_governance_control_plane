@@ -112,6 +112,38 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
 
+  sdk-typescript:
+    name: SDK (TypeScript)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/typescript
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: sdk/typescript/package-lock.json
+
+      - run: npm ci || npm install
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+      # The contract fixture is generated from the Python SDK. If someone edits
+      # the request body on one side and not the other, the two clients start
+      # getting different decisions out of the same policy -- so regenerate it
+      # here and fail if it moved.
+      - name: The contract fixture is not stale
+        working-directory: .
+        run: |
+          python3 -m venv /tmp/contract-venv
+          /tmp/contract-venv/bin/pip install -q -e ./sdk/python
+          /tmp/contract-venv/bin/python tools/generate_sdk_contract.py
+          git diff --exit-code sdk/typescript/test/contract.json
+
   docker:
     name: Image
     runs-on: ubuntu-latest

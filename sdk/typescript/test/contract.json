@@ -1,0 +1,253 @@
+{
+  "generated_by": "tools/generate_sdk_contract.py",
+  "source": "sdk/python/control_plane_sdk/client.py",
+  "satisfied_by_control_plane": [
+    "annotate",
+    "log",
+    "redact",
+    "ttl"
+  ],
+  "outcomes": [
+    "enforced",
+    "refused",
+    "partial"
+  ],
+  "cases": [
+    {
+      "name": "minimal",
+      "input": {
+        "principal_id": "svc://a",
+        "action": "read"
+      },
+      "body": {
+        "principal": {
+          "id": "svc://a",
+          "type": "service",
+          "attributes": {}
+        },
+        "action": "read",
+        "resource": {
+          "urn": null,
+          "kind": null,
+          "classifications": [],
+          "attributes": {}
+        },
+        "context": {},
+        "options": {
+          "explain": false,
+          "apply_obligations": true,
+          "persist": true
+        }
+      },
+      "cache_key": "svc://a|service|read|None|[]|{}"
+    },
+    {
+      "name": "full",
+      "input": {
+        "principal_id": "agent://analyst",
+        "action": "infer",
+        "principal_type": "agent",
+        "principal_attributes": {
+          "trust": "low",
+          "reviewed": true
+        },
+        "resource_urn": "pg://public.customers",
+        "resource_kind": "table",
+        "classifications": [
+          "pii.email",
+          "phi"
+        ],
+        "resource_attributes": {
+          "owner": "clinical"
+        },
+        "context": {
+          "destination": "external",
+          "purpose": "support",
+          "region": "eu"
+        },
+        "correlation_id": "conv-1",
+        "explain": true,
+        "apply_obligations": false,
+        "persist": false
+      },
+      "body": {
+        "principal": {
+          "id": "agent://analyst",
+          "type": "agent",
+          "attributes": {
+            "trust": "low",
+            "reviewed": true
+          }
+        },
+        "action": "infer",
+        "resource": {
+          "urn": "pg://public.customers",
+          "kind": "table",
+          "classifications": [
+            "pii.email",
+            "phi"
+          ],
+          "attributes": {
+            "owner": "clinical"
+          }
+        },
+        "context": {
+          "destination": "external",
+          "purpose": "support",
+          "region": "eu"
+        },
+        "options": {
+          "explain": true,
+          "apply_obligations": false,
+          "persist": false
+        },
+        "correlation_id": "conv-1"
+      },
+      "cache_key": "agent://analyst|agent|infer|pg://public.customers|[\"phi\",\"pii.email\"]|{\"destination\":\"external\",\"purpose\":\"support\",\"region\":\"eu\"}"
+    },
+    {
+      "name": "with_payload",
+      "input": {
+        "principal_id": "agent://x",
+        "action": "return",
+        "payload": {
+          "text": "SSN 501-72-9384"
+        },
+        "resource_urn": "mcp://srv/read_file",
+        "resource_kind": "tool"
+      },
+      "body": {
+        "principal": {
+          "id": "agent://x",
+          "type": "service",
+          "attributes": {}
+        },
+        "action": "return",
+        "resource": {
+          "urn": "mcp://srv/read_file",
+          "kind": "tool",
+          "classifications": [],
+          "attributes": {}
+        },
+        "context": {},
+        "options": {
+          "explain": false,
+          "apply_obligations": true,
+          "persist": true
+        },
+        "payload": {
+          "text": "SSN 501-72-9384"
+        }
+      },
+      "cache_key": "agent://x|service|return|mcp://srv/read_file|[]|{}"
+    },
+    {
+      "name": "with_approval",
+      "input": {
+        "principal_id": "u://1",
+        "action": "export",
+        "approval_id": "ap_9"
+      },
+      "body": {
+        "principal": {
+          "id": "u://1",
+          "type": "service",
+          "attributes": {}
+        },
+        "action": "export",
+        "resource": {
+          "urn": null,
+          "kind": null,
+          "classifications": [],
+          "attributes": {}
+        },
+        "context": {},
+        "options": {
+          "explain": false,
+          "apply_obligations": true,
+          "persist": true
+        },
+        "approval_id": "ap_9"
+      },
+      "cache_key": "u://1|service|export|None|[]|{}"
+    },
+    {
+      "name": "empty_collections",
+      "input": {
+        "principal_id": "svc://b",
+        "action": "write",
+        "classifications": [],
+        "context": {},
+        "principal_attributes": {},
+        "resource_attributes": {}
+      },
+      "body": {
+        "principal": {
+          "id": "svc://b",
+          "type": "service",
+          "attributes": {}
+        },
+        "action": "write",
+        "resource": {
+          "urn": null,
+          "kind": null,
+          "classifications": [],
+          "attributes": {}
+        },
+        "context": {},
+        "options": {
+          "explain": false,
+          "apply_obligations": true,
+          "persist": true
+        }
+      },
+      "cache_key": "svc://b|service|write|None|[]|{}"
+    },
+    {
+      "name": "context_ordering",
+      "input": {
+        "principal_id": "svc://c",
+        "action": "read",
+        "context": {
+          "z": 1,
+          "a": "two",
+          "m": false
+        },
+        "classifications": [
+          "z.label",
+          "a.label",
+          "m.label"
+        ]
+      },
+      "body": {
+        "principal": {
+          "id": "svc://c",
+          "type": "service",
+          "attributes": {}
+        },
+        "action": "read",
+        "resource": {
+          "urn": null,
+          "kind": null,
+          "classifications": [
+            "z.label",
+            "a.label",
+            "m.label"
+          ],
+          "attributes": {}
+        },
+        "context": {
+          "z": 1,
+          "a": "two",
+          "m": false
+        },
+        "options": {
+          "explain": false,
+          "apply_obligations": true,
+          "persist": true
+        }
+      },
+      "cache_key": "svc://c|service|read|None|[\"a.label\",\"m.label\",\"z.label\"]|{\"a\":\"two\",\"m\":false,\"z\":1}"
+    }
+  ]
+}

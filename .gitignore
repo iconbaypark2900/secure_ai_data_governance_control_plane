@@ -31,3 +31,7 @@ ui/dist/
 *.sqlite3
 data/
 .DS_Store
+
+# TypeScript SDK build output
+sdk/typescript/dist/
+sdk/typescript/node_modules/
