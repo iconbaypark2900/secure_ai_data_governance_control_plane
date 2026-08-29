@@ -29,10 +29,31 @@ COMMENT ON COLUMN public.customers.ssn IS 'sensitive: pii.ssn';
 CREATE TABLE public.orders (id serial PRIMARY KEY, sku text, quantity int);
 CREATE VIEW public.recent_orders AS SELECT * FROM public.orders;
 
+-- The other two relkinds the adapter enumerates. Both are shapes a real
+-- warehouse has and neither was covered: a partitioned table reports relkind 'p'
+-- and its partitions report 'r', and a materialized view reports 'm' while
+-- holding a physical copy of whatever it selected -- which is the governance
+-- point, because that copy inherits the source's sensitivity without inheriting
+-- its controls.
+CREATE TABLE public.events (
+  id bigserial,
+  occurred_at date NOT NULL,
+  patient_email text
+) PARTITION BY RANGE (occurred_at);
+CREATE TABLE public.events_2026 PARTITION OF public.events
+  FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+COMMENT ON COLUMN public.events.patient_email IS 'sensitive: pii.email';
+
+CREATE MATERIALIZED VIEW public.customer_digest AS
+  SELECT full_name, email, ssn FROM public.customers;
+
 INSERT INTO public.customers (full_name, email, ssn)
 VALUES ('Jane Doe', 'jane.doe@acme.com', '536-90-4432'),
        ('Sam Patel', 'sam.patel@example.org', '457-55-5462');
 INSERT INTO public.orders (sku, quantity) VALUES ('ABC-1', 2), ('XYZ-9', 1);
+INSERT INTO public.events (occurred_at, patient_email)
+VALUES ('2026-03-04', 'ana.ruiz@clinic.example'), ('2026-07-19', 'lee.park@clinic.example');
+REFRESH MATERIALIZED VIEW public.customer_digest;
 """
 
 
@@ -79,9 +100,30 @@ class TestDiscovery:
         assert not any(".pg_" in urn or "information_schema" in urn for urn in urns)
 
     async def test_kinds_are_distinguished(self, warehouse) -> None:
+        """All four relkinds the query selects, not just the two that are easy.
+
+        relkind is where this adapter's last bug lived -- asyncpg returns it as
+        bytes, so every view was catalogued as a table -- and 'p' and 'm' were
+        enumerated by the query but never exercised by a test.
+        """
         found = {a.urn: a for a in await warehouse.discover()}
         assert found["pg://public.customers"].kind == "table"
         assert found["pg://public.recent_orders"].kind == "view"
+        assert found["pg://public.events"].kind == "partitioned_table"
+        assert found["pg://public.customer_digest"].kind == "materialized_view"
+
+    async def test_a_partition_is_catalogued_in_its_own_right(self, warehouse) -> None:
+        """It holds the rows, so a scan that skipped it would scan nothing."""
+        found = {a.urn: a for a in await warehouse.discover()}
+        assert found["pg://public.events_2026"].kind == "table"
+
+    async def test_a_materialized_view_carries_its_own_columns(self, warehouse) -> None:
+        found = {a.urn: a for a in await warehouse.discover()}
+        assert set(found["pg://public.customer_digest"].attributes["columns"]) == {
+            "full_name",
+            "email",
+            "ssn",
+        }
 
     async def test_table_comments_become_descriptions(self, warehouse) -> None:
         found = {a.urn: a for a in await warehouse.discover()}
@@ -119,6 +161,61 @@ class TestSampling:
         samples = [s async for s in warehouse.sample("pg://public.customers", limit=1)]
         assert samples[0].partial is True
 
+    async def test_a_partitioned_parent_samples_across_its_partitions(self, warehouse) -> None:
+        """The parent holds no rows itself; a read has to reach the partitions."""
+        samples = [s async for s in warehouse.sample("pg://public.events", limit=10)]
+        assert samples[0].record_count == 2
+        assert {row["patient_email"] for row in samples[0].content} == {
+            "ana.ruiz@clinic.example",
+            "lee.park@clinic.example",
+        }
+
+    async def test_tablesample_works_on_a_partitioned_parent(self, pg_engine) -> None:
+        """The branch that was actually untested.
+
+        Sampling only takes the TABLESAMPLE path above 10,000 rows, and every
+        existing fixture is tiny, so that statement had never run against a
+        partitioned table. It turns out PostgreSQL 17 handles it -- checked
+        rather than assumed, because I had assumed the opposite.
+        """
+        async with pg_engine.begin() as connection:
+            await connection.execute(text("DROP TABLE IF EXISTS public.big_events CASCADE"))
+            await connection.execute(
+                text(
+                    "CREATE TABLE public.big_events (id bigint, d date, note text) "
+                    "PARTITION BY RANGE (d)"
+                )
+            )
+            await connection.execute(
+                text(
+                    "CREATE TABLE public.big_events_a PARTITION OF public.big_events "
+                    "FOR VALUES FROM ('2026-01-01') TO ('2026-07-01')"
+                )
+            )
+            await connection.execute(
+                text(
+                    "CREATE TABLE public.big_events_b PARTITION OF public.big_events "
+                    "FOR VALUES FROM ('2026-07-01') TO ('2027-01-01')"
+                )
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO public.big_events "
+                    "SELECT g, '2026-03-01'::date + (g % 300), 'note ' || g "
+                    "FROM generate_series(1, 12000) g"
+                )
+            )
+        adapter = PostgresAdapter(engine=pg_engine)
+        samples = [s async for s in adapter.sample("pg://public.big_events", limit=50)]
+        assert 0 < samples[0].record_count <= 50
+        assert samples[0].partial is True
+
+    async def test_a_materialized_view_can_be_sampled(self, warehouse) -> None:
+        """It is a physical copy of sensitive rows; not scanning it hides them."""
+        samples = [s async for s in warehouse.sample("pg://public.customer_digest", limit=10)]
+        assert samples[0].record_count == 2
+        assert {row["ssn"] for row in samples[0].content} == {"536-90-4432", "457-55-5462"}
+
     async def test_a_malformed_urn_is_rejected(self, warehouse) -> None:
         with pytest.raises(ValueError, match="schema and table"):
             [s async for s in warehouse.sample("pg://noschema")]
@@ -141,7 +238,7 @@ class TestEndToEnd:
         report = await DiscoveryService(session=session).run(
             warehouse, source="warehouse", scan=True, exclude=["*.recent_orders"]
         )
-        assert report.discovered == 2
+        assert report.discovered == 5
         assert not report.failed
 
         resolved = await CatalogService(session).resolve("pg://public.customers")
