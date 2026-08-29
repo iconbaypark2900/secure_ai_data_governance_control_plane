@@ -46,6 +46,7 @@ from control_plane_sdk import (
 )
 
 from pep.reverse_proxy.obligations import (
+    RESPONSE_SATISFIABLE,
     SATISFIABLE,
     Backend,
     apply_request_obligations,
@@ -349,7 +350,7 @@ async def chat_completions(
     if not outbound.allowed:
         return _denied(outbound, "outbound")
     try:
-        governed_answer = await _control_plane.enforce(outbound, can_satisfy=SATISFIABLE)
+        governed_answer = await _control_plane.enforce(outbound, can_satisfy=RESPONSE_SATISFIABLE)
     except ObligationUnsatisfied as exc:
         return _denied(Decision.denial(str(exc)), "outbound")
     if governed_answer is not None and governed_answer != answer:
@@ -426,7 +427,7 @@ async def _stream(
         if not decision.allowed:
             return span, decision.reason
         try:
-            governed = await _control_plane.enforce(decision, can_satisfy=SATISFIABLE)
+            governed = await _control_plane.enforce(decision, can_satisfy=RESPONSE_SATISFIABLE)
         except ObligationUnsatisfied as exc:
             return span, str(exc)
         return (governed if isinstance(governed, str) else span), None

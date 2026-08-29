@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 __all__ = [
+    "RESPONSE_SATISFIABLE",
     "SATISFIABLE",
     "AppliedObligations",
     "Backend",
@@ -42,9 +43,22 @@ __all__ = [
     "token_cap",
 ]
 
-#: What this enforcement point tells the SDK it can discharge. Anything else in a
-#: decision turns the allow into a refusal rather than being quietly ignored.
+#: What this enforcement point tells the SDK it can discharge on the way *in*.
+#: Anything else in a decision turns the allow into a refusal rather than being
+#: quietly ignored.
 SATISFIABLE: frozenset[str] = frozenset({"limit", "watermark", "require_purpose", "route"})
+
+#: And on the way back, which is a strictly smaller set.
+#:
+#: The distinction is not pedantry. ``route`` picks the backend a request is sent
+#: to; by the time a response exists that choice has already been made and cannot
+#: be revisited, and ``require_purpose`` was checked before the request went out.
+#: Declaring them here claimed a capability this direction does not have, and
+#: since a claimed obligation is a discharged one, a route obligation attached to
+#: a ``return`` action was reported satisfied while nothing routed anything.
+#: Found by a second enforcement point that made the same claim and could not
+#: back it up.
+RESPONSE_SATISFIABLE: frozenset[str] = frozenset({"limit", "watermark"})
 
 
 @dataclass

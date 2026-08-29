@@ -513,6 +513,52 @@ window, which stops the stream with an explicit message rather than corrupting
 it. `PEP_STREAM_MODE=buffer` trades incremental delivery for no blind spot at
 all.
 
+### The second enforcement point: tool calls
+
+`pep/mcp_proxy/` sits in front of an MCP server. Where the reverse proxy governs
+what an agent *says* to a model, this governs what it *does*.
+
+```bash
+$ PEP_MCP_UPSTREAM=http://localhost:3001/mcp uvicorn pep.mcp_proxy.main:app --port 8170
+
+tools/list   118 tools upstream -> 73 offered to this agent
+tools/call   filesystem-write_file -> refused, and the tool never ran
+             read_patient_file     -> ran, and the result came back as:
+                 "Maria Alvarez, SSN [REDACTED:pii.ssn], mrn 4419772."
+                 "Contact <pii.email:52145a6d695faf91>."
+```
+
+Verified against a live gateway fronting 118 real tools across seven MCP servers.
+
+**Both directions, again.** Arguments are the data leaving the agent; a tool
+result is data arriving that the agent never asked for by name. Text blocks are
+rewritten in place — image and resource blocks pass through untouched rather than
+being pretended about, and the block structure survives.
+
+**A tool the agent may not call is not advertised.** That is a convenience, not a
+control: an agent can name a tool it was never shown, and the call is decided on
+its own. The filtering asks with `persist=False` and writes nothing to the audit
+log, because nothing is carried out by deciding what to offer. Recording it
+seemed obviously right until measurement: one `tools/list` wrote 360 decision
+records with no outcome on any of them, twenty times the volume of the calls, and
+buried the `?outcome=unreported` filter under questions that never had an outcome.
+
+**A refusal is a JSON-RPC error, not an HTTP one.** An HTTP 403 kills the
+session; a JSON-RPC error carrying the request's id is a normal recoverable
+answer to one call.
+
+The honest limit: a result can be withheld after the call has already run. Worth
+doing — it is the difference between the agent having the data and not — but it
+cannot undo a side effect, so the error says so and tells the agent not to retry.
+A duty that must *prevent* something has to attach to the invocation.
+
+Building it found a bug in the older enforcement point: the reverse proxy
+declared it could satisfy a `route` obligation on the response path, where there
+is nothing left to route, so the obligation was reported discharged while nothing
+happened. Two enforcement points disagreeing is how the first one's assumption
+became visible. Reasoning in
+[ADR 0016](docs/adr/0016-a-second-enforcement-point-for-tool-calls.md).
+
 ### Filling the catalog
 
 A control plane only governs what it knows about, and a catalog maintained by
@@ -613,11 +659,12 @@ control_plane/
   pdp.py            the pipeline that ties it together
   cli.py            cpctl
 sdk/python/         the enforcement-point client
-pep/reverse_proxy/  the reference enforcement point
+pep/reverse_proxy/  the reference enforcement point (chat completions)
+pep/mcp_proxy/      the second one (MCP tool calls)
 ui/                 the admin console (React + TypeScript)
 seed/               the reference policy set and catalog
 migrations/         Alembic, including the append-only trigger
-tests/              658 tests
+tests/              706 tests
 docs/               architecture, the policy language, and the decision records
 ```
 
@@ -674,7 +721,7 @@ string of each denial.
 ## Testing
 
 ```bash
-make test        # 623 tests on SQLite, no external dependencies
+make test        # 666 tests on SQLite, no external dependencies
 make test-pg     # + those that need real Postgres
 make test-qdrant # + those that need a real Qdrant
 make check       # ruff, mypy, and the suite — everything CI runs

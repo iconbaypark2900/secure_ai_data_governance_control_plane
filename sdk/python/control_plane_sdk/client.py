@@ -254,6 +254,7 @@ def _build_body(
     approval_id: str | None,
     explain: bool,
     apply_obligations: bool,
+    persist: bool,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
         "principal": {
@@ -269,7 +270,11 @@ def _build_body(
             "attributes": dict(resource_attributes or {}),
         },
         "context": dict(context or {}),
-        "options": {"explain": explain, "apply_obligations": apply_obligations},
+        "options": {
+            "explain": explain,
+            "apply_obligations": apply_obligations,
+            "persist": persist,
+        },
     }
     if payload is not None:
         body["payload"] = payload
@@ -383,9 +388,18 @@ class AsyncControlPlaneClient(_ClientBase):
         approval_id: str | None = None,
         explain: bool = False,
         apply_obligations: bool = True,
+        persist: bool = True,
         use_cache: bool = True,
     ) -> Decision:
-        """Ask whether an action is permitted."""
+        """Ask whether an action is permitted.
+
+        ``persist=False`` evaluates without writing a decision record. It is for
+        asking a question, not for taking an action: an enforcement point that
+        acts on the answer must record it, because a decision that was enforced
+        and not recorded is precisely the gap this system exists to close. The
+        legitimate use is advisory -- deciding what to *offer* someone, where
+        nothing is carried out and the real decision happens later.
+        """
         body = _build_body(
             principal_id=principal_id,
             action=action,
@@ -401,6 +415,7 @@ class AsyncControlPlaneClient(_ClientBase):
             approval_id=approval_id,
             explain=explain,
             apply_obligations=apply_obligations,
+            persist=persist,
         )
 
         # A decision about content depends on that content, and an approval
@@ -642,6 +657,7 @@ class ControlPlaneClient(_ClientBase):
         approval_id: str | None = None,
         explain: bool = False,
         apply_obligations: bool = True,
+        persist: bool = True,
         use_cache: bool = True,
     ) -> Decision:
         body = _build_body(
@@ -659,6 +675,7 @@ class ControlPlaneClient(_ClientBase):
             approval_id=approval_id,
             explain=explain,
             apply_obligations=apply_obligations,
+            persist=persist,
         )
         # Never cache an approval redemption: it is spent exactly once.
         cacheable = use_cache and payload is None and not explain and approval_id is None

@@ -137,6 +137,43 @@ policies:
       - type: log
         level: info
 
+  - key: allow-tool-results-back-redacted
+    name: Tool results reach the agent with identifiers masked
+    description: >
+      The counterpart to the grant above, for the other direction. A tool result
+      carries data the agent did not have and did not ask for by name: a file
+      read returns whatever the file held, a search returns whatever it found.
+      Governing the call and not the result would protect the tool and leave the
+      agent holding everything it returned.
+
+      Separate from the read grant on purpose. Reading an asset is a question
+      about an asset the catalog knows; a tool result is a question about
+      content that did not exist until the call ran, and the two deserve
+      different priorities and different obligations.
+
+      Note what this does not do: it cannot undo the call. By the time this is
+      evaluated the tool has already run and any side effect has already
+      happened. Withholding the result is worth doing -- it is the difference
+      between the agent having the data and not -- but a duty that must prevent
+      an action has to be attached to the invocation, not to its result.
+    effect: allow
+    priority: 200
+    tags: [agents, tools]
+    match:
+      all:
+        - principal.type: agent
+        - action: {in: [return]}
+        - resource.kind: tool
+    obligations:
+      - type: redact
+        labels: [pii.ssn, pii.passport, pii.drivers_license, pii.national_id]
+        strategy: mask
+      - type: redact
+        labels: [pii.email, pii.phone]
+        strategy: hash
+      - type: log
+        level: info
+
   - key: route-regulated-data-to-eu-models
     name: Regulated data is inferred inside the EU
     description: >
@@ -153,7 +190,13 @@ policies:
         # Only model calls. Routing a database read to a model is meaningless,
         # and a routing rule that forgets to say so quietly intercepts every
         # ordinary read of the same data.
-        - action: {in: [infer, embed, return]}
+        #
+        # 'return' was here too, and should not have been. Routing decides where
+        # a request is *sent*; by the time there is a result the choice has
+        # already been made. The obligation was unsatisfiable in that direction
+        # and got reported as discharged anyway, which is worse than either
+        # honouring it or refusing it.
+        - action: {in: [infer, embed]}
         - classifications: {any_of: [phi, pci, pii.ssn]}
     obligations:
       - type: route
