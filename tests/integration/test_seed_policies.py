@@ -56,7 +56,10 @@ async def ask(pdp, **kwargs):
     body = {
         "principal": {"id": kwargs.pop("principal"), "type": kwargs.pop("type", "agent")},
         "action": kwargs.pop("action"),
-        "resource": {"urn": kwargs.pop("resource", None)},
+        "resource": {
+            "urn": kwargs.pop("resource", None),
+            "kind": kwargs.pop("resource_kind", None),
+        },
         "context": kwargs.pop("context", {}),
         "payload": kwargs.pop("payload", None),
     }
@@ -271,6 +274,61 @@ class TestResidencyRouting:
         )
         assert response.effect == "deny"
         assert "no registered model satisfies" in response.reason
+
+
+class TestTheReturnLeg:
+    """Both directions have to work, or the proxy in front of them does not.
+
+    Found by putting the reference proxy in front of a local ollama and sending
+    it a real prompt. The prompt was permitted and the answer was denied.
+    """
+
+    async def test_a_model_answer_reaches_an_agent_on_an_internal_model(self, reference) -> None:
+        """The gap: the only allow for a model 'return' required destination=external.
+
+        A model running on your own hardware is the ordinary self-hosted case,
+        and there every answer came back "no policy matched; applied the default
+        effect 'deny'". The reference proxy defaults PEP_DESTINATION to
+        external, which is what kept it hidden.
+        """
+        response = await ask(
+            reference,
+            principal="agent:support_bot",
+            action="return",
+            resource="model://internal/llama-3-70b",
+            resource_kind="model",
+            payload="Sure -- their address is 44 Rue de Rivoli.",
+            context={"destination": "internal"},
+        )
+        assert response.effect == "allow"
+
+    async def test_identifiers_in_the_answer_are_still_redacted(self, reference) -> None:
+        """A model given clean input can still emit something that was not."""
+        response = await ask(
+            reference,
+            principal="agent:support_bot",
+            action="return",
+            resource="model://internal/llama-3-70b",
+            resource_kind="model",
+            payload="Contact them on jane.doe@acme.com or 415-555-0142.",
+            context={"destination": "internal"},
+        )
+        assert response.effect == "allow"
+        assert "jane.doe@acme.com" not in str(response.payload)
+        assert "415-555-0142" not in str(response.payload)
+
+    async def test_a_credential_in_the_answer_is_still_refused(self, reference) -> None:
+        """Deny overrides. Permitting the return leg must not weaken that."""
+        response = await ask(
+            reference,
+            principal="agent:support_bot",
+            action="return",
+            resource="model://internal/llama-3-70b",
+            resource_kind="model",
+            payload="the key is sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+            context={"destination": "internal"},
+        )
+        assert response.effect == "deny"
 
 
 class TestHumanInTheLoop:

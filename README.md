@@ -698,7 +698,7 @@ pep/mcp_proxy/      the second one (MCP tool calls)
 ui/                 the admin console (React + TypeScript)
 seed/               the reference policy set and catalog
 migrations/         Alembic, including the append-only trigger
-tests/              723 tests
+tests/              718 tests (+8 needing a live Qdrant)
 docs/               architecture, the policy language, and the decision records
 ```
 
@@ -755,7 +755,7 @@ string of each denial.
 ## Testing
 
 ```bash
-make test        # 679 tests on SQLite, no external dependencies
+make test        # 682 tests on SQLite, no external dependencies
 make test-pg     # + those that need real Postgres
 make test-qdrant # + those that need a real Qdrant
 make check       # ruff, mypy, and the suite — everything CI runs

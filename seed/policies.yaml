@@ -137,6 +137,44 @@ policies:
       - type: log
         level: info
 
+  - key: allow-model-responses-back-redacted
+    name: A model's answer reaches the agent with identifiers masked
+    description: >
+      The return leg of ordinary inference. Without it the only allow for a
+      'return' action on a model is the external-inference grant below, which
+      requires context.destination = external -- so a proxy in front of a model
+      running on your own hardware permits the prompt and then denies every
+      answer. That is not a hypothetical: it is what happens the first time
+      anyone points the reference proxy at a local model, and the proxy's own
+      default of destination=external is what hides it.
+
+      Kept separate from the read grant for the same reason as tool results: a
+      model's answer is content that did not exist until the call ran, not a
+      read of an asset the catalog knows about. It can carry a memorised
+      training example, a credential a tool handed the model, or a row it
+      inferred from context -- none of which the inbound decision could have
+      seen.
+
+      Deny still overrides. Credentials and card numbers in a response are
+      refused by the rules above this one, whatever destination it came from.
+    effect: allow
+    priority: 200
+    tags: [agents, models]
+    match:
+      all:
+        - principal.type: agent
+        - action: {in: [return]}
+        - resource.kind: model
+    obligations:
+      - type: redact
+        labels: [pii.ssn, pii.passport, pii.drivers_license, pii.national_id]
+        strategy: mask
+      - type: redact
+        labels: [pii.email, pii.phone]
+        strategy: hash
+      - type: log
+        level: info
+
   - key: allow-tool-results-back-redacted
     name: Tool results reach the agent with identifiers masked
     description: >
