@@ -576,7 +576,12 @@ disagree.
   embedding model that produced it, and if that model is hosted outside the
   boundary the collection is a record of an egress
 - **MCP** — maps `tool → resource`, `arguments → payload`, so an agent handing a
-  customer record to a web search is a governed event
+  customer record to a web search is a governed event. Reads all four of MCP's
+  annotation hints, and records whether the verdict was *declared* by the server
+  or *inferred* from the tool name — the spec is explicit that annotations are
+  hints and that clients "should never make tool use decisions based on
+  ToolAnnotations received from untrusted servers", so a server's self-
+  description is stored as an assertion rather than as a finding of fact
 - **LibreChat** — maps users and agents to principals, uploads to assets, and
   outbound messages to `infer` decisions
 
@@ -612,7 +617,7 @@ pep/reverse_proxy/  the reference enforcement point
 ui/                 the admin console (React + TypeScript)
 seed/               the reference policy set and catalog
 migrations/         Alembic, including the append-only trigger
-tests/              641 tests
+tests/              658 tests
 docs/               architecture, the policy language, and the decision records
 ```
 
@@ -669,7 +674,7 @@ string of each denial.
 ## Testing
 
 ```bash
-make test        # 606 tests on SQLite, no external dependencies
+make test        # 623 tests on SQLite, no external dependencies
 make test-pg     # + those that need real Postgres
 make test-qdrant # + those that need a real Qdrant
 make check       # ruff, mypy, and the suite — everything CI runs

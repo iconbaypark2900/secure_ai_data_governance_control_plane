@@ -1,0 +1,322 @@
+[
+  {
+    "name": "filesystem-read_file",
+    "title": "Read File (Deprecated)",
+    "description": "Read the complete contents of a file as text. DEPRECATED: Use read_text_file instead.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "tail": {
+          "type": "number"
+        },
+        "head": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "git-git_status",
+    "description": "Shows the working tree status",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "repo_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo_path"
+      ],
+      "title": "GitStatus"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "filesystem-write_file",
+    "title": "Write File",
+    "description": "Create a new file or completely overwrite an existing file with new content. Use with caution as it will overwrite existing files without warning. Handles te...",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "content"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "git-git_reset",
+    "description": "Unstages all staged changes",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "repo_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo_path"
+      ],
+      "title": "GitReset"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "memory-delete_entities",
+    "title": "Delete Entities",
+    "description": "Delete multiple entities and their associated relations from the knowledge graph",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "entityNames": {
+          "type": "array"
+        }
+      },
+      "required": [
+        "entityNames"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "arxiv-get_paper_latex",
+    "description": "Download, safely process, cache, and return bounded original LaTeX source. Use section tools for targeted reading.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "paper_id": {
+          "type": "string"
+        },
+        "start": {
+          "type": "integer"
+        },
+        "max_chars": {
+          "type": "integer"
+        },
+        "return_full_text": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "paper_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": true
+    }
+  },
+  {
+    "name": "arxiv-download_paper",
+    "description": "Download a paper from arXiv and return its text content. Tries the HTML version first for clean extraction; falls back to PDF conversion if HTML is unavailab...",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "paper_id": {
+          "type": "string"
+        },
+        "start": {
+          "type": "integer"
+        },
+        "max_chars": {
+          "type": "integer"
+        },
+        "return_full_text": {
+          "type": "boolean"
+        },
+        "force": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "paper_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": true
+    }
+  },
+  {
+    "name": "arxiv-search_papers",
+    "description": "Search arXiv by query with optional categories, date range, sort, and pagination.\n\nQuery: prefer quoted phrases; ti:/au:/abs:/cat:; AND/OR/ANDNOT. Unprefixed...",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "max_results": {
+          "type": "integer"
+        },
+        "start": {
+          "type": "integer"
+        },
+        "abstract_mode": {
+          "type": "string"
+        },
+        "date_from": {
+          "type": "string"
+        },
+        "date_to": {
+          "type": "string"
+        },
+        "categories": {
+          "type": "array"
+        },
+        "sort_by": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": true
+    }
+  },
+  {
+    "name": "fetch-fetch",
+    "description": "Fetches a URL from the internet and optionally extracts its contents as markdown.\n\nAlthough originally you did not have internet access, and were advised to ...",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "max_length": {
+          "type": "integer"
+        },
+        "start_index": {
+          "type": "integer"
+        },
+        "raw": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "description": "Parameters for fetching a URL.",
+      "title": "Fetch"
+    }
+  },
+  {
+    "name": "context7-resolve-library-id",
+    "title": "Resolve Context7 Library ID",
+    "description": "Resolves a package/product name to a Context7-compatible library ID and returns matching libraries.\n\nYou MUST call this function before 'Query Documentation'...",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "libraryName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "query",
+        "libraryName"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
+    }
+  },
+  {
+    "name": "github-create_or_update_file",
+    "description": "Create or update a single file in a GitHub repository",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "owner": {
+          "type": "string"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "sha": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "owner",
+        "repo",
+        "path",
+        "content",
+        "message",
+        "branch"
+      ],
+      "additionalProperties": false
+    }
+  }
+]
