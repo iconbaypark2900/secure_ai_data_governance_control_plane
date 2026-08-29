@@ -19,6 +19,7 @@ authorisation question -- are eligible.
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import asynccontextmanager
@@ -223,19 +224,37 @@ class _DecisionCache:
 
 
 def _cache_key(body: Mapping[str, Any]) -> str:
+    """A key that distinguishes questions the policy engine distinguishes.
+
+    Context and classifications are JSON-encoded rather than stringified. The
+    obvious ``f"{k}={v}"`` form conflates values the server does not: it made
+    ``{"external": True}`` and ``{"external": "True"}`` the same key, and a
+    policy matching a boolean does not match the string. The second caller then
+    received the first one's decision -- a cache answering a different question,
+    which is a correctness bug whatever the cache is nominally for. Found while
+    porting this function to TypeScript, by asking what the two would disagree
+    about.
+    """
     principal = body.get("principal", {})
     resource = body.get("resource", {})
-    context = body.get("context", {})
     return "|".join(
         [
             str(principal.get("id")),
             str(principal.get("type")),
             str(body.get("action")),
             str(resource.get("urn")),
-            ",".join(sorted(str(c) for c in resource.get("classifications", []))),
-            ",".join(f"{k}={v}" for k, v in sorted(context.items())),
+            _canonical(sorted(str(c) for c in resource.get("classifications", []))),
+            _canonical(body.get("context", {})),
         ]
     )
+
+
+def _canonical(value: Any) -> str:
+    """A stable, type-preserving rendering. Falls back rather than raising."""
+    try:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), default=repr)
+    except (TypeError, ValueError):
+        return repr(value)
 
 
 def _build_body(

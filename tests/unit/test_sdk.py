@@ -170,6 +170,84 @@ class TestCaching:
         await client.decide(principal_id="a", action="read", context={"destination": "external"})
         assert calls["count"] == 2
 
+    @pytest.mark.parametrize(
+        ("first", "second"),
+        [
+            ({"external": True}, {"external": "True"}),
+            ({"external": True}, {"external": "true"}),
+            ({"limit": 1}, {"limit": "1"}),
+            ({"tier": 0}, {"tier": False}),
+            ({"region": None}, {"region": "None"}),
+        ],
+    )
+    async def test_values_of_different_types_are_different_questions(
+        self, first: dict, second: dict
+    ) -> None:
+        """A cache that answers a different question is a correctness bug.
+
+        The key was built by string-formatting each value, which conflated
+        things the policy engine does not: a rule matching ``context.external``
+        against the boolean true does not match the string "True". The second
+        caller then received the first one's decision, and on this pairing that
+        can be an allow standing in for a deny.
+
+        Found while porting the client to TypeScript -- writing the same
+        function twice and asking what the two would disagree about.
+        """
+        calls = {"count": 0}
+
+        def counting(_request: httpx.Request) -> httpx.Response:
+            calls["count"] += 1
+            return httpx.Response(200, json=ALLOW_BODY)
+
+        client = client_with(counting, cache_ttl=60)
+        await client.decide(principal_id="a", action="read", context=first)
+        await client.decide(principal_id="a", action="read", context=second)
+        assert calls["count"] == 2
+
+    async def test_the_same_context_still_hits_whatever_the_key_order(self) -> None:
+        """Fixing the collision must not stop the cache caching."""
+        calls = {"count": 0}
+
+        def counting(_request: httpx.Request) -> httpx.Response:
+            calls["count"] += 1
+            return httpx.Response(200, json=ALLOW_BODY)
+
+        client = client_with(counting, cache_ttl=60)
+        await client.decide(principal_id="a", action="read", context={"a": 1, "b": True})
+        await client.decide(principal_id="a", action="read", context={"b": True, "a": 1})
+        assert calls["count"] == 1
+
+    def test_a_value_that_is_not_json_serialisable_does_not_raise(self) -> None:
+        """The key builder must not become a second failure mode.
+
+        Such a context never reaches the wire -- the request body cannot encode
+        it either -- so this is asserted against the key builder directly rather
+        than through decide(), which would fail for an unrelated reason and pass
+        this test for the wrong one.
+        """
+        from control_plane_sdk.client import _cache_key
+
+        body = {
+            "principal": {"id": "a", "type": "service"},
+            "action": "read",
+            "resource": {"urn": None, "classifications": []},
+            "context": {"when": object()},
+        }
+        assert isinstance(_cache_key(body), str)
+
+    async def test_a_classification_containing_the_separator_is_not_confused(self) -> None:
+        calls = {"count": 0}
+
+        def counting(_request: httpx.Request) -> httpx.Response:
+            calls["count"] += 1
+            return httpx.Response(200, json=ALLOW_BODY)
+
+        client = client_with(counting, cache_ttl=60)
+        await client.decide(principal_id="a", action="read", classifications=["a,b"])
+        await client.decide(principal_id="a", action="read", classifications=["a", "b"])
+        assert calls["count"] == 2
+
 
 class TestRequestShape:
     async def test_the_key_is_sent_and_the_body_is_well_formed(self) -> None:
