@@ -170,13 +170,19 @@ class TestSampling:
             "lee.park@clinic.example",
         }
 
-    async def test_tablesample_works_on_a_partitioned_parent(self, pg_engine) -> None:
-        """The branch that was actually untested.
+    async def test_a_large_table_never_samples_to_nothing(self, pg_engine) -> None:
+        """The branch that was actually untested, and the bug in it.
 
         Sampling only takes the TABLESAMPLE path above 10,000 rows, and every
-        existing fixture is tiny, so that statement had never run against a
-        partitioned table. It turns out PostgreSQL 17 handles it -- checked
-        rather than assumed, because I had assumed the opposite.
+        existing fixture is tiny, so that statement had never run at all. Two
+        things came out of running it. PostgreSQL 17 does support TABLESAMPLE on
+        a partitioned parent, which I had assumed it did not. And SYSTEM
+        sampling selects whole blocks, so on a 12,000-row table 12 of 40 samples
+        returned *nothing* -- the asset would be scanned, found to hold no
+        labels, and reported clean.
+
+        Repeated, because a single pass had a seventy percent chance of passing
+        against the broken code.
         """
         async with pg_engine.begin() as connection:
             await connection.execute(text("DROP TABLE IF EXISTS public.big_events CASCADE"))
@@ -206,9 +212,11 @@ class TestSampling:
                 )
             )
         adapter = PostgresAdapter(engine=pg_engine)
-        samples = [s async for s in adapter.sample("pg://public.big_events", limit=50)]
-        assert 0 < samples[0].record_count <= 50
-        assert samples[0].partial is True
+        for _ in range(12):
+            samples = [s async for s in adapter.sample("pg://public.big_events", limit=50)]
+            assert samples[0].record_count == 50
+            assert samples[0].partial is True
+            assert samples[0].content[0]["note"].startswith("note ")
 
     async def test_a_materialized_view_can_be_sampled(self, warehouse) -> None:
         """It is a physical copy of sensitive rows; not scanning it hides them."""
