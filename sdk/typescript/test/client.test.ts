@@ -346,3 +346,71 @@ describe("the api key travels", () => {
     expect(calls[0]?.headers["X-API-Key"]).toBeUndefined();
   });
 });
+
+describe("the server can say it did not do it", () => {
+  /**
+   * `SATISFIED_BY_CONTROL_PLANE` names what the control plane *can* execute.
+   * Whether it executed on a particular decision is a per-decision fact only the
+   * server holds, and consulting a static set with no reference to the request
+   * is how this client came to hand back an unredacted payload and then write
+   * `discharged: ["redact"]` into the durable record -- for a redaction the
+   * plane had reported, in the same response, that it did not perform.
+   *
+   * The field was already parsed and already public. It was simply never
+   * consulted. See ADR 0018.
+   */
+  const UNRUN = {
+    ...ALLOW,
+    payload: "reach jane.doe@acme.com about the refund",
+    obligations: [{ type: "redact" }],
+    unsupported_obligations: ["redact"],
+  };
+
+  it("a redaction the plane declined is outstanding", () => {
+    expect(Decision.fromResponse(UNRUN).outstanding()).toEqual(["redact"]);
+  });
+
+  it("the payload is not handed back", () => {
+    expect(() => Decision.fromResponse(UNRUN).enforce()).toThrowError(ObligationUnsatisfied);
+  });
+
+  it("an enforcement point with its own redactor may still declare it", () => {
+    // Subtraction only. The server shrinks what this client trusts; the caller
+    // is still the one who can widen it, by declaring what it does.
+    expect(Decision.fromResponse(UNRUN).enforce(["redact"])).toBe(UNRUN.payload);
+  });
+
+  it("an ordinary response is untouched", () => {
+    // The outage guard. An empty `unsupported_obligations` subtracts nothing,
+    // so every clean prompt and every clean tool call still goes through.
+    const ran = Decision.fromResponse({ ...ALLOW, obligations: [{ type: "redact" }] });
+    expect(ran.outstanding()).toEqual([]);
+    expect(ran.enforce()).toBe("clean text");
+  });
+
+  it("never writes the false discharge into the record", async () => {
+    // The load-bearing assumption of the whole change: `enforcing` and
+    // `enforce` both report `discharged: obligationTypes()` with no filtering
+    // of their own, and neither needed an edit, because both are reached only
+    // after `decision.enforce()` returns -- and it now throws first. Confirmed
+    // by test rather than by reading: if that order ever changes, the record
+    // starts carrying the false discharge again and nothing else here notices.
+    const { fetch, calls } = stubFetch({ responses: [json(UNRUN), json({})] });
+    const client = new ControlPlaneClient("http://cp.test", { fetch });
+    const decision = await client.decide({ principalId: "a", action: "read" });
+
+    let entered = false;
+    await expect(
+      client.enforcing(decision, async () => {
+        entered = true;
+      }),
+    ).rejects.toThrowError(ObligationUnsatisfied);
+
+    expect(entered).toBe(false);
+    expect(calls[1]?.body).toMatchObject({
+      outcome: Outcome.REFUSED,
+      discharged: [],
+      undischarged: ["redact"],
+    });
+  });
+});

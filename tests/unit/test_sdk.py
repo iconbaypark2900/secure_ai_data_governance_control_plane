@@ -554,3 +554,92 @@ class TestOutcomeReporting:
             async with client.enforcing(decision):
                 pytest.fail("the block must not run")
         assert posts == []
+
+
+class TestTheServerCanSayItDidNotDoIt:
+    """`SATISFIED_BY_CONTROL_PLANE` is a capability, not a receipt.
+
+    The set names what the control plane *can* execute. Whether it executed on
+    a particular decision is a per-decision fact only the server holds, and
+    consulting a static set with no reference to the request is how this client
+    came to hand back an unredacted payload and then write `discharged:
+    ["redact"]` into the durable record -- for a redaction the plane had
+    reported, in the same response, that it did not perform.
+
+    The field was already parsed and already public. It was simply never
+    consulted. See ADR 0018.
+    """
+
+    UNRUN = {
+        **ALLOW_BODY,
+        "payload": "reach jane.doe@acme.com about the refund",
+        "redactions": [],
+        "unsupported_obligations": ["redact"],
+    }
+
+    def test_the_set_is_unchanged(self) -> None:
+        """The fix is subtraction at the call site, not a smaller constant.
+
+        Making the set dynamic would sever the chain that keeps three copies of
+        it agreeing: this file asserts it against the server's, CI generates
+        contract.json from it, and contract.test.ts checks the TypeScript Set
+        against contract.json. The constant stays; what changes is that it is no
+        longer the last word.
+        """
+        assert set(SATISFIED_BY_CONTROL_PLANE) == {"redact"}
+        assert SATISFIED_BY_CONTROL_PLANE == CONTROL_PLANE_OBLIGATIONS
+
+    def test_a_redaction_the_plane_declined_is_outstanding(self) -> None:
+        assert Decision.from_response(self.UNRUN).outstanding() == ["redact"]
+
+    def test_the_payload_is_not_handed_back(self) -> None:
+        decision = Decision.from_response(self.UNRUN)
+        with pytest.raises(ObligationUnsatisfied, match="redact"):
+            decision.enforce()
+
+    def test_an_enforcement_point_with_its_own_redactor_may_still_declare_it(self) -> None:
+        """Subtraction only. The server shrinks what this client trusts; the
+        caller is still the one who can widen it, by declaring what it does."""
+        decision = Decision.from_response(self.UNRUN)
+        assert decision.enforce(can_satisfy={"redact"}) == self.UNRUN["payload"]
+
+    def test_the_ordinary_response_is_untouched(self) -> None:
+        """The outage guard. An empty `unsupported_obligations` subtracts nothing."""
+        assert Decision.from_response(ALLOW_BODY).outstanding() == []
+        assert Decision.from_response(ALLOW_BODY).enforce() == "safe content"
+
+    async def test_the_false_discharge_is_never_written(self) -> None:
+        """The load-bearing assumption of the whole SDK change, by test.
+
+        `enforcing` and `enforce` both report `discharged=obligation_types()`
+        with no filtering of their own, and neither needed an edit -- because
+        both are reached only *after* `decision.enforce()` returns, and it now
+        raises first. Confirming that by test rather than by reading it: if the
+        order ever changes, the record starts carrying the false discharge again
+        and nothing else here would notice.
+        """
+        seen, handler = TestOutcomeReporting._recording()
+        client = client_with(handler)
+        decision = Decision.from_response(self.UNRUN)
+
+        with pytest.raises(ObligationUnsatisfied):
+            await client.enforce(decision)
+
+        assert seen[0]["outcome"] == "refused"
+        assert seen[0]["undischarged"] == ["redact"]
+        assert "redact" not in seen[0]["discharged"]
+
+    async def test_enforcing_refuses_before_the_block_runs(self) -> None:
+        seen, handler = TestOutcomeReporting._recording()
+        client = client_with(handler)
+        decision = Decision.from_response(self.UNRUN)
+
+        entered = False
+        with pytest.raises(ObligationUnsatisfied):
+            async with client.enforcing(decision):
+                entered = True
+
+        assert entered is False
+        assert seen[0]["outcome"] == "refused"
+        assert seen[0]["discharged"] == []
+        assert seen[0]["undischarged"] == ["redact"]

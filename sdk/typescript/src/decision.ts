@@ -87,9 +87,26 @@ export class Decision {
     return [...types].sort();
   }
 
-  /** Obligation types nobody in this exchange is going to carry out. */
+  /**
+   * Obligation types nobody in this exchange is going to carry out.
+   *
+   * `SATISFIED_BY_CONTROL_PLANE` is what the plane *can* execute. Whether it
+   * executed on this decision is a per-decision fact only the server holds, and
+   * it reports it: a redaction pass that did not run -- no payload, or
+   * obligations withheld -- puts `redact` in `unsupported_obligations`.
+   * Subtracting it is what stops this client handing back an unredacted payload
+   * and then reporting the redaction discharged.
+   *
+   * Subtraction only, and deliberately: the server can shrink what this client
+   * treats as satisfied, never grow it. A response is not able to talk this
+   * client into considering a duty handled.
+   */
   outstanding(canSatisfy: Iterable<string> = []): string[] {
-    const satisfiable = new Set([...SATISFIED_BY_CONTROL_PLANE, ...canSatisfy].map(String));
+    const undischarged = new Set(this.unsupportedObligations.map(String));
+    const satisfiable = new Set(
+      [...SATISFIED_BY_CONTROL_PLANE].filter((type) => !undischarged.has(String(type))).map(String),
+    );
+    for (const type of canSatisfy) satisfiable.add(String(type));
     return this.obligationTypes().filter((type) => !satisfiable.has(type));
   }
 

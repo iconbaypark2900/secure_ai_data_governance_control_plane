@@ -166,8 +166,22 @@ class Decision:
         return sorted({str(o.get("type")) for o in self.obligations if o.get("type")})
 
     def outstanding(self, can_satisfy: Iterable[str] = ()) -> list[str]:
-        """Obligation types nobody in this exchange is going to carry out."""
-        satisfiable = SATISFIED_BY_CONTROL_PLANE | {str(item) for item in can_satisfy}
+        """Obligation types nobody in this exchange is going to carry out.
+
+        `SATISFIED_BY_CONTROL_PLANE` is what the plane *can* execute. Whether it
+        executed on this decision is a per-decision fact only the server holds,
+        and it reports it: a redaction pass that did not run -- no payload, or
+        obligations withheld -- puts `redact` in `unsupported_obligations`.
+        Subtracting it is what stops this client handing back an unredacted
+        payload and then reporting the redaction discharged.
+
+        Subtraction only, and deliberately: the server can shrink what this
+        client treats as satisfied, never grow it. A response is not able to
+        talk this client into considering a duty handled.
+        """
+        satisfiable = (SATISFIED_BY_CONTROL_PLANE - set(self.unsupported_obligations)) | {
+            str(item) for item in can_satisfy
+        }
         return sorted(t for t in self.obligation_types() if t not in satisfiable)
 
     def enforce(self, *, can_satisfy: Iterable[str] = ()) -> Any:
