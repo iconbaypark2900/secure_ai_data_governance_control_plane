@@ -1,6 +1,7 @@
 # 0007 — An approval is a scoped, single-use capability
 
 **Status:** accepted
+**Amended by:** [0019](0019-a-redemption-is-the-record-of-it.md)
 
 ## Context
 

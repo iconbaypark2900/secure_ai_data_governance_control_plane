@@ -12,7 +12,7 @@ costs — the last part being the one that is never reconstructible afterwards.
 | [0004](0004-fail-closed.md) | Fail closed everywhere, by default |
 | [0005](0005-separate-label-selectors.md) | Keep catalog labels and payload findings separate |
 | [0006](0006-no-payload-persistence.md) | Never persist payload content |
-| [0007](0007-approvals-are-scoped-capabilities.md) | Make an approval a scoped, single-use capability |
+| [0007](0007-approvals-are-scoped-capabilities.md) | Make an approval a scoped, single-use capability — amended by [0019](0019-a-redemption-is-the-record-of-it.md) |
 | [0008](0008-discovery-uses-named-sources.md) | Run discovery against named, server-side sources |
 | [0009](0009-tokenisation-without-a-vault.md) | Make the token the ciphertext, so there is no vault to steal |
 | [0010](0010-declare-only-what-is-implemented.md) | Implement an obligation or remove it; nothing in between — amended by [0017](0017-the-control-plane-executes-one-obligation.md) and [0018](0018-an-obligation-is-discharged-per-decision.md) |
@@ -24,3 +24,4 @@ costs — the last part being the one that is never reconstructible afterwards.
 | [0016](0016-a-second-enforcement-point-for-tool-calls.md) | Govern tool calls with a second enforcement point |
 | [0017](0017-the-control-plane-executes-one-obligation.md) | The control plane declares the one obligation it executes — amended by [0018](0018-an-obligation-is-discharged-per-decision.md) |
 | [0018](0018-an-obligation-is-discharged-per-decision.md) | An obligation is discharged per decision, not per type |
+| [0019](0019-a-redemption-is-the-record-of-it.md) | Spending an approval and recording the decision that spent it are one act |

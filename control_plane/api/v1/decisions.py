@@ -116,13 +116,20 @@ async def simulate(body: SimulateRequest, pdp: PDPDep, store: PolicyStoreDep) ->
     simulated_request.options.persist = False
     simulated_request.options.explain = True
 
+    # `simulating=True` is what separates this from an ordinary decide that
+    # happens not to be recorded. Both set persist=False; only this one may
+    # exercise a presented approval without spending it, and it is a Python
+    # argument rather than a request option so the party holding the approval
+    # cannot claim it. See ADR 0019.
     engine = PolicyEngine(candidates, algorithm=CombiningAlgorithm.DENY_OVERRIDES)
-    decision = await pdp.decide(simulated_request, engine=engine)
+    decision = await pdp.decide(simulated_request, engine=engine, simulating=True)
 
     baseline = None
     changed = False
     if body.policies is not None or body.additional_policies:
-        baseline = await pdp.decide(simulated_request, engine=await store.build_engine())
+        baseline = await pdp.decide(
+            simulated_request, engine=await store.build_engine(), simulating=True
+        )
         changed = (baseline.effect, sorted(baseline.matched_policies)) != (
             decision.effect,
             sorted(decision.matched_policies),

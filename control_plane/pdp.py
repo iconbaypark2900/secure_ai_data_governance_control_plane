@@ -69,6 +69,28 @@ log = structlog.get_logger(__name__)
 #: How long a parked decision stays actionable before it must be re-requested.
 APPROVAL_TTL = timedelta(hours=24)
 
+#: Why a redemption is refused on a decision that will not be recorded.
+#:
+#: An approval is a single-use capability, and the only thing that makes it
+#: single-use is the row `_mark_redeemed` writes. That write lives inside
+#: `if request.options.persist:`, so a caller that asked not to be recorded
+#: redeemed the approval, received the allow, and left the capability unspent --
+#: indefinitely, and with no decision record or audit event to show it had been
+#: used at all. "Approve this one export" became "export forever, unlogged".
+#:
+#: The knob was never meant to say that. `persist=False` means two different
+#: things to two callers: /v1/simulate uses it for "this is hypothetical", and a
+#: delegating enforcement point uses it for "do not write a row for this". Only
+#: the first may redeem without spending, and the difference is not visible in
+#: the request -- which is why `simulating` is a Python argument the wire cannot
+#: set rather than a field on DecideOptions. See ADR 0019.
+UNRECORDABLE_REDEMPTION = (
+    "an approval is spent by the decision that redeems it, and this request set "
+    "options.persist false: there would be no decision record, no audit event, "
+    "and nothing to stop the same approval being presented again. Redeem on a "
+    "recorded decision, or use /v1/simulate to see what it would do"
+)
+
 #: Obligation types the control plane carries out itself. Anything else is handed
 #: to the enforcement point, which must satisfy it or deny. Imported rather than
 #: restated: two copies of this set would eventually disagree, and the direction
@@ -112,8 +134,16 @@ class PolicyDecisionPoint:
         *,
         engine: PolicyEngine | None = None,
         actor: str = "",
+        simulating: bool = False,
     ) -> DecideResponse:
-        """Evaluate ``request`` and return the answer."""
+        """Evaluate ``request`` and return the answer.
+
+        ``simulating`` marks the caller as asking a hypothetical -- /v1/simulate,
+        which runs this twice against two policy sets and persists neither. It is
+        an argument rather than a request option on purpose: it decides whether a
+        single-use capability may be exercised without being spent, so it must
+        not be settable by the party presenting the capability.
+        """
         started = time.perf_counter()
 
         try:
@@ -160,11 +190,18 @@ class PolicyDecisionPoint:
             approval: ApprovalRequest | None = None
             approval_error: str | None = None
             if decision.effect is Effect.REQUIRE_APPROVAL and request.approval_id is not None:
-                approval, approval_error = await self._validate_approval(
-                    request.approval_id, fingerprint
-                )
-                if approval is not None:
-                    decision = self._redeemed_decision(decision, approval, active_engine)
+                # Refused before the approval is even looked up. Spending it is
+                # the same act as recording the decision that spent it, so a
+                # request that has opted out of the record has opted out of
+                # redeeming -- and it is told so rather than quietly parked.
+                if not simulating and not request.options.persist:
+                    approval_error = UNRECORDABLE_REDEMPTION
+                else:
+                    approval, approval_error = await self._validate_approval(
+                        request.approval_id, fingerprint
+                    )
+                    if approval is not None:
+                        decision = self._redeemed_decision(decision, approval, active_engine)
 
         except Exception as exc:
             # Fail closed. An exception here means the control plane could not

@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import select
 
 from control_plane.audit.service import AuditService
@@ -300,7 +301,14 @@ class TestSingleUse:
         assert approval.redeemed_at is not None
 
     async def test_a_simulation_does_not_spend_it(self, pdp, session) -> None:
-        """Exploring what an approval would do must not consume it."""
+        """Exploring what an approval would do must not consume it.
+
+        ``simulating=True`` is what /v1/simulate passes, and it is now the only
+        way to reach a redemption that leaves the capability unspent. This test
+        asserted the same allow from ``persist=False`` alone -- which is what an
+        ordinary /v1/decide caller sends -- and so it specified the replay below
+        rather than the simulation it is named for. See ADR 0019.
+        """
         parked = await pdp.decide(export_request())
         await grant(session, parked.approval.id)
 
@@ -308,9 +316,11 @@ class TestSingleUse:
             export_request(
                 approval_id=str(parked.approval.id),
                 options=DecideOptions(persist=False).model_dump(),
-            )
+            ),
+            simulating=True,
         )
         assert simulated.effect == "allow"
+        assert simulated.approval_redeemed is True
 
         approval = (
             await session.execute(
@@ -318,6 +328,86 @@ class TestSingleUse:
             )
         ).scalar_one()
         assert approval.redeemed_at is None
+
+    async def test_a_decision_that_is_not_recorded_cannot_redeem_it(self, pdp, session) -> None:
+        """The replay, and the whole reason single use is enforceable at all.
+
+        `_mark_redeemed` is the only thing that spends an approval, and it is
+        written inside `if request.options.persist:`. So a caller presenting a
+        granted approval with `persist=False` received the allow, wrote no
+        decision record and no audit event, and left the capability exactly as
+        spendable as before -- for as long as the grant lasts. Measured at five
+        consecutive authorised exports off one human approval, with nothing
+        anywhere to show it had been used.
+
+        The refusal comes before the approval is looked up, because the reason
+        has nothing to do with the approval: spending it and recording the
+        decision that spent it are the same act.
+        """
+        parked = await pdp.decide(export_request())
+        await grant(session, parked.approval.id)
+        approval_id = str(parked.approval.id)
+        before = len((await session.execute(select(DecisionRecord))).scalars().all())
+
+        for _ in range(5):
+            replayed = await pdp.decide(
+                export_request(
+                    approval_id=approval_id,
+                    options=DecideOptions(persist=False).model_dump(),
+                )
+            )
+            assert replayed.effect == "require_approval"
+            assert replayed.approval_redeemed is False
+            assert "options.persist false" in replayed.approval_error
+
+        assert len((await session.execute(select(DecisionRecord))).scalars().all()) == before
+
+        approval = (
+            await session.execute(
+                select(ApprovalRequest).where(ApprovalRequest.id == parked.approval.id)
+            )
+        ).scalar_one()
+        assert approval.redeemed_at is None
+
+    def test_the_party_holding_the_approval_cannot_claim_to_be_simulating(self) -> None:
+        """The exemption is a Python argument, and that is the whole of its safety.
+
+        `simulating` decides whether a single-use capability may be exercised
+        without being spent. If it were a request option, the party presenting
+        the capability would set it, and the fix would be the defect with an
+        extra step. It is reachable only from the /v1/simulate handler, which is
+        also a different scope: POLICY_READ, not DECIDE.
+        """
+        assert "simulating" not in DecideOptions.model_fields
+        assert "simulating" not in DecideRequest.model_fields
+        with pytest.raises(ValidationError):
+            DecideOptions(simulating=True)  # type: ignore[call-arg]
+
+    async def test_being_refused_that_way_does_not_burn_the_approval(self, pdp, session) -> None:
+        """Refusing the unrecordable shape must not cost the holder their grant.
+
+        The human approved an export. Presenting it through a request the plane
+        will not record is a caller mistake, and the answer is to send it again
+        on a recorded decision -- not to make the person approve it twice.
+        """
+        parked = await pdp.decide(export_request())
+        await grant(session, parked.approval.id)
+        approval_id = str(parked.approval.id)
+
+        refused = await pdp.decide(
+            export_request(
+                approval_id=approval_id, options=DecideOptions(persist=False).model_dump()
+            )
+        )
+        assert refused.effect == "require_approval"
+
+        redeemed = await pdp.decide(export_request(approval_id=approval_id))
+        assert redeemed.effect == "allow"
+        assert redeemed.approval_redeemed is True
+
+        second = await pdp.decide(export_request(approval_id=approval_id))
+        assert second.effect == "require_approval"
+        assert "already redeemed" in second.approval_error
 
 
 class TestLifecycleRefusals:
