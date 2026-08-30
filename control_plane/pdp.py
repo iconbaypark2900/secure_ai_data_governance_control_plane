@@ -173,12 +173,29 @@ class PolicyDecisionPoint:
             log.error("decision_pipeline_failed", error=str(exc), action=request.action)
             if not self._settings.fail_closed:
                 raise
-            return DecideResponse(
+            failure = DecideResponse(
                 effect="deny",
                 reason=f"decision pipeline failed and the control plane fails closed: {exc}",
                 latency_ms=round((time.perf_counter() - started) * 1000, 3),
                 policy_errors=[str(exc)],
             )
+            if request.options.persist:
+                # Its own try, and it swallows. A failure to record the failure
+                # must never convert the deny into a raise: the whole value of
+                # failing closed is that the caller gets an answer it can act
+                # on, and losing that to a second fault would be the pipeline
+                # error taking out the response as well as the decision.
+                try:
+                    record = await self._persist_failure(request, failure, started, actor=actor)
+                    failure.decision_id = record.id
+                except Exception as persist_exc:
+                    log.error(
+                        "decision_failure_not_recorded",
+                        error=str(persist_exc),
+                        action=request.action,
+                    )
+                    await self._rollback_quietly()
+            return failure
 
         decision = self._guard_tokenization(decision)
         decision, routing = await self._resolve_routing(decision, request)
@@ -466,6 +483,88 @@ class PolicyDecisionPoint:
             },
         )
         return record
+
+    async def _persist_failure(
+        self,
+        request: DecideRequest,
+        response: DecideResponse,
+        started: float,
+        *,
+        actor: str,
+    ) -> DecisionRecord:
+        """Record a decision the pipeline could not complete.
+
+        The `except` above used to return before ever reaching `_persist`, so a
+        fail-closed deny wrote neither the row nor the sealed audit entry -- at
+        `persist=True`, silently. That is the decision most worth having a
+        record of: a deny nobody asked for, produced because the plane could not
+        establish that the request was safe. Without a row it is invisible to
+        every query an operator runs afterwards, and a burst of them looks
+        exactly like quiet.
+
+        Minimal on purpose. Everything the ordinary record carries beyond this
+        -- the labels, the finding count, the payload digest -- is computed
+        inside the `try` that just failed, so there is nothing honest to put
+        there. ADR 0006 is untouched: no digest is better than a wrong one.
+
+        Whether it raises is not its problem: `decide` contains that, because a
+        failure to record the failure must never convert the deny into an
+        exception.
+        """
+        latency_ms = round((time.perf_counter() - started) * 1000, 3)
+        record = DecisionRecord(
+            id=uuid.uuid4(),
+            principal_id=request.principal.id,
+            principal_type=str(request.principal.type),
+            action=request.action,
+            resource_urn=request.resource.urn or "",
+            resource_kind=request.resource.kind or "",
+            effect=response.effect,
+            reason=response.reason,
+            determining_policy=None,
+            matched_policies=[],
+            obligations=[],
+            classifications=[],
+            finding_count=0,
+            redaction_count=0,
+            unsupported_obligations=[],
+            payload_digest=None,
+            context=_safe_context(request.context),
+            trace={"policy_errors": list(response.policy_errors)},
+            latency_ms=latency_ms,
+            correlation_id=request.correlation_id,
+        )
+        self._session.add(record)
+        await self._session.flush()
+
+        await self._audit.append(
+            AuditEvent.DECISION,
+            actor=actor or request.principal.id,
+            subject=request.resource.urn or request.action,
+            payload={
+                "decision_id": str(record.id),
+                "effect": response.effect,
+                "action": request.action,
+                "principal_type": str(request.principal.type),
+                "determining_policy": None,
+                "policy_errors": list(response.policy_errors),
+                "correlation_id": request.correlation_id,
+                "latency_ms": latency_ms,
+            },
+        )
+        return record
+
+    async def _rollback_quietly(self) -> None:
+        """Put the session back in a usable state after a failed write.
+
+        A failed flush leaves the session needing a rollback before anything
+        else can use it. Nothing else is pending at this point -- the pipeline
+        failed before any write -- so there is nothing to lose.
+        """
+        try:
+            await self._session.rollback()
+        except Exception as exc:  # pragma: no cover - defensive
+            log.error("rollback_failed", error=str(exc))
 
     def _guard_tokenization(self, decision: Decision) -> Decision:
         """Deny when a decision requires tokenisation that cannot be performed.

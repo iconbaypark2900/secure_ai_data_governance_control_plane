@@ -238,6 +238,82 @@ class TestPersistence:
         assert await audit.count() >= 2
         assert (await audit.verify()).valid is True
 
+    async def test_a_fail_closed_deny_is_recorded_like_any_other(
+        self, pdp, session, monkeypatch, audit_key
+    ) -> None:
+        """The `except` path returned before the persist block, writing neither half.
+
+        ``test_every_decision_seals_an_audit_record`` makes the claim in its
+        name and never exercised this branch; the shipped policy set makes it in
+        prose -- "every decision unless the caller sets options.persist false".
+        A decision the pipeline could not complete is the one most worth having
+        a row for: it is a deny nobody asked for, and without this it is
+        invisible to every query an operator runs afterwards.
+        """
+
+        def explode(*args, **kwargs):
+            raise RuntimeError("catalog unavailable")
+
+        monkeypatch.setattr(CatalogService, "resolve", explode)
+        response = await pdp.decide(request_for(payload="jane.doe@acme.com"))
+        assert response.effect == "deny"
+        assert response.decision_id is not None
+
+        record = (
+            await session.execute(
+                select(DecisionRecord).where(DecisionRecord.id == response.decision_id)
+            )
+        ).scalar_one()
+        assert record.effect == "deny"
+        assert record.determining_policy is None
+        assert "catalog unavailable" in record.reason
+        # ADR 0006: the digest is computed inside the failed try, so there is
+        # none to store. A row saying nothing about the payload beats no row.
+        assert record.payload_digest is None
+
+        audit = AuditService(session, key=audit_key)
+        assert await audit.count() >= 1
+        assert (await audit.verify()).valid is True
+
+    async def test_a_fail_closed_deny_at_persist_false_still_writes_nothing(
+        self, pdp, session, monkeypatch
+    ) -> None:
+        def explode(*args, **kwargs):
+            raise RuntimeError("catalog unavailable")
+
+        monkeypatch.setattr(CatalogService, "resolve", explode)
+        response = await pdp.decide(request_for(options=DecideOptions(persist=False).model_dump()))
+        assert response.effect == "deny"
+        assert response.decision_id is None
+        assert (await session.execute(select(DecisionRecord))).scalars().all() == []
+
+    async def test_a_failure_to_record_a_failure_is_still_a_deny(
+        self, pdp, session, monkeypatch
+    ) -> None:
+        """Persistence must never be able to convert the deny into a raise.
+
+        The whole value of failing closed is that the caller gets an answer it
+        can act on. A second exception on the way to writing the row about the
+        first one would take that away.
+        """
+
+        def explode(*args, **kwargs):
+            raise RuntimeError("catalog unavailable")
+
+        async def also_explode(*args, **kwargs):
+            raise RuntimeError("the database is gone too")
+
+        monkeypatch.setattr(CatalogService, "resolve", explode)
+        monkeypatch.setattr(PolicyDecisionPoint, "_persist_failure", also_explode)
+        response = await pdp.decide(request_for())
+        assert response.effect == "deny"
+        assert response.decision_id is None
+
+    async def test_persist_false_writes_nothing(self, pdp, session) -> None:
+        response = await pdp.decide(request_for(options=DecideOptions(persist=False).model_dump()))
+        assert response.decision_id is None
+        assert (await session.execute(select(DecisionRecord))).scalars().all() == []
+
 
 class TestExplainability:
     async def test_explain_returns_the_full_trace(self, pdp) -> None:

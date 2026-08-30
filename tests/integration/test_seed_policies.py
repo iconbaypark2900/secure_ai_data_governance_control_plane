@@ -563,3 +563,39 @@ class TestTheDescriptionsAreChecked:
         assert bare.effect == "allow"
         assert "E11.9" in str(bare.payload)
         assert bare.residual_labels == []
+
+    async def test_a_pipeline_failure_is_recorded_like_the_description_says(
+        self, reference, session, monkeypatch, audit_key
+    ) -> None:
+        """`allow-analysts-read-unredacted` claims a record and an audit event
+        on every decision unless persist is false. It was untrue in one place:
+        the fail-closed path returned before the persist block, so a decision
+        the pipeline could not complete wrote neither half. Made true rather
+        than made weaker -- that decision is the one most worth a row.
+        """
+        from sqlalchemy import select
+
+        from control_plane.audit.service import AuditService
+        from control_plane.models.decision import DecisionRecord
+
+        def explode(*args, **kwargs):
+            raise RuntimeError("catalog unavailable")
+
+        monkeypatch.setattr(CatalogService, "resolve", explode)
+        response = await ask(
+            reference,
+            principal="user:analyst",
+            type="user",
+            action="read",
+            resource="pg://public.customers",
+        )
+        assert response.effect == "deny"
+        assert response.decision_id is not None
+
+        record = (
+            await session.execute(
+                select(DecisionRecord).where(DecisionRecord.id == response.decision_id)
+            )
+        ).scalar_one()
+        assert record.effect == "deny"
+        assert (await AuditService(session, key=audit_key).verify()).valid is True

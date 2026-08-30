@@ -284,8 +284,17 @@ policies:
     name: Cleared analysts see the real values
     description: >
       Redaction has a cost: an analyst investigating a specific customer cannot
-      do it against hashes. High-trust human principals read through, and every
-      such read is recorded against their name.
+      do it against hashes. High-trust human principals read through -- and every
+      such read is recorded against their name by the decision record and the
+      audit event the control plane writes for it, which happens on every
+      decision it returns unless the caller sets options.persist false. That
+      now includes a decision the pipeline could not complete: those deny and
+      used to return before the persist step, writing neither half, which made
+      the deny nobody asked for the one decision with no record of it. If the
+      write itself fails the answer is still a deny and the failure is logged;
+      there is no configuration in which reading through goes unrecorded and
+      succeeds. It carries no obligations because it needs none: reading
+      through is the absence of a duty, not the presence of one.
     effect: allow
     priority: 300
     tags: [humans]
