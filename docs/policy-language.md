@@ -339,6 +339,42 @@ obligations:
   - {type: require_purpose, purposes: [support]}      # re-checked at the point of use
 ```
 
+### Who executed it is a fact about the decision, not about the type
+
+The table above says who is *capable* of each type. Whether it happened is
+answered per decision, in `unsupported_obligations` — and the control plane's own
+`redact` appears there whenever this particular request was not one it could run
+on:
+
+| request | `unsupported_obligations` |
+|---|---|
+| payload present, defaults | `[]` — the plane ran its pass |
+| payload present, nothing sensitive in it | `[]` — the pass ran and found nothing |
+| **no payload** | `["redact"]` — nothing to redact, so nobody redacted |
+| **`apply_obligations: false`** | `["redact"]` — you asked to carry it out yourself |
+
+Note the second row. The plane reports the pass as *executed*, not as
+*effective*: a clean payload and a payload whose findings no rule covered both
+produce zero redactions, and both count. If it reported on the redaction count
+instead, every clean prompt would come back with an outstanding duty and both
+SDKs would refuse it.
+
+The field is always populated. Read it, or use an SDK — both subtract it from
+what they consider already satisfied, so `enforce()` refuses rather than handing
+back a payload nobody redacted. A response also carries `residual_labels`: the
+labels the scan found that the redaction rules did not cover, which is the gap
+between what an obligation says and what it reaches. It is not an obligation and
+nobody is asked to discharge it; it is there so a claim like "identifiers are
+removed" can be checked against a number.
+
+Two request shapes are refused outright rather than reported on. Sending a
+payload with `scan_payload: false`, or with `min_confidence` above
+`CP_MAX_REQUEST_MIN_CONFIDENCE` (default `0.5`), is a **422**: those stop
+findings reaching the engine at all, so a `findings:` deny would never fire and
+there would be no obligation left to report. Classify elsewhere and declare
+`resource.classifications` instead. Lowering `min_confidence` is always allowed.
+See [ADR 0018](adr/0018-an-obligation-is-discharged-per-decision.md).
+
 `require_purpose` deliberately duplicates what a `context.purpose` match
 condition can express. The condition is checked where the decision is made; the
 obligation is checked where the data is used, by a proxy that stops trusting the

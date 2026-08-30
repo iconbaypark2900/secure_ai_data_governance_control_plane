@@ -240,6 +240,7 @@ export interface DecideResponse {
   classifications: string[]; findings: Finding[]; regulations: string[];
   payload: unknown; redactions: Record<string, unknown>[];
   unsupported_obligations: string[];
+  residual_labels: string[];
   route: RoutingInfo | null;
   payload_truncated: boolean;
   explain: { trace?: TraceEntry[] } | null;

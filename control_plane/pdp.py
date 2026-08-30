@@ -183,7 +183,9 @@ class PolicyDecisionPoint:
         decision = self._guard_tokenization(decision)
         decision, routing = await self._resolve_routing(decision, request)
 
-        response = self._build_response(request, decision, findings, all_labels)
+        response = self._build_response(
+            request, decision, findings, all_labels, payload_truncated=scan.truncated
+        )
         if routing is not None:
             response.route = routing.to_dict()
         response.payload_truncated = scan.truncated
@@ -265,11 +267,55 @@ class PolicyDecisionPoint:
         decision: Decision,
         findings: Sequence[Finding],
         labels: Sequence[str],
+        payload_truncated: bool = False,
     ) -> DecideResponse:
         from control_plane.classification import taxonomy
 
+        # Whether *this decision* ran the plane's redaction pass. `SELF_EXECUTABLE`
+        # names the types the plane can execute; it does not say that any given
+        # request was one it did. `_apply_redactions` below is the whole of the
+        # execution, and it is reached only on this conjunction -- so outside it
+        # the duty is real, undischarged, and the enforcement point is the only
+        # party left who can carry it out. Telling it otherwise is the one class
+        # of unkept duty that makes no noise at all.
+        #
+        # Keyed on the pass having *run*, never on `redactions` being non-empty.
+        # A clean payload and a payload whose findings no rule covers both
+        # produce zero redactions and are both executions; keying on the result
+        # would put `redact` outstanding on every clean prompt through
+        # `pep/reverse_proxy` and every clean MCP tool call, and both SDKs would
+        # turn those allows into refusals. That is the trap ADR 0017's first
+        # draft walked into, in new clothing.
+        #
+        # This is a `redact`-shaped predicate wearing a set-shaped coat: it is
+        # correct only while CONTROL_PLANE_OBLIGATIONS is {"redact"}. A second
+        # type needs its own witness here. The matrix in
+        # TestTheResponseSaysWhatThisDecisionDid iterates the set so one cannot
+        # be added without supplying it. See ADR 0018.
+        # Truncation is the case three request-option conjuncts could not see:
+        # every one of them is a fact about what the *caller asked for*, and
+        # none is a fact about what the scanner actually covered. Past
+        # `CP_MAX_SCAN_CHARS` the scanner reads only the head, so the redactor
+        # rewrites only the head and the tail comes back verbatim while the pass
+        # has genuinely run. "Ran" is not "ran over the whole payload", and the
+        # duty is discharged only over the prefix.
+        #
+        # `payload_truncated` already carried the fact and still does, but
+        # nothing outside `ui/` reads it, whereas this is the field both SDKs
+        # consult and the one the schema calls a correction channel that must
+        # never go quiet. `residual_labels` cannot cover it either: it derives
+        # from `findings`, and the tail produced none, so it comes back empty
+        # and indistinguishable from a payload with nothing left uncovered.
+        ran_redaction = (
+            decision.effect is Effect.ALLOW
+            and request.options.apply_obligations
+            and request.options.scan_payload
+            and request.payload is not None
+            and not payload_truncated
+        )
+        discharged_here = SELF_EXECUTABLE if ran_redaction else frozenset[str]()
         unsupported = sorted(
-            {o.type for o in decision.obligations if o.type not in SELF_EXECUTABLE}
+            {o.type for o in decision.obligations if o.type not in discharged_here}
         )
 
         response = DecideResponse(
@@ -281,7 +327,13 @@ class PolicyDecisionPoint:
             classifications=list(labels),
             findings=[FindingOut(**f.redacted_dict()) for f in findings],
             regulations=list(taxonomy.regulations_for(labels)),
-            unsupported_obligations=unsupported if request.options.apply_obligations else [],
+            # Unconditional. `apply_obligations` says who executes the plane's
+            # own obligations; it says nothing about the enforcement point's,
+            # and blanking the list on the strength of it told a caller its
+            # watermark duty was clear. The sibling correction channel `route`
+            # is already set unconditionally, and the schema promises this one
+            # the same way.
+            unsupported_obligations=unsupported,
             policy_errors=list(decision.errors),
         )
 
@@ -290,16 +342,44 @@ class PolicyDecisionPoint:
 
         # Only an allow returns content, and only when asked to apply obligations.
         if decision.effect is Effect.ALLOW and request.options.apply_obligations:
-            redacted = self._apply_obligations(request.payload, decision.obligations, findings)
+            redacted = self._apply_redactions(request.payload, decision.obligations, findings)
             if redacted is not None:
                 response.payload = redacted.payload
                 response.redactions = [RedactionOut(**item.to_dict()) for item in redacted.applied]
             elif request.payload is not None:
                 response.payload = request.payload
+            if ran_redaction:
+                response.residual_labels = self._residual_labels(decision.obligations, findings)
 
         return response
 
-    def _apply_obligations(
+    def _residual_labels(
+        self, obligations: Sequence[Obligation], findings: Sequence[Finding]
+    ) -> list[str]:
+        """Labels the scan found that this decision's redact rules do not cover.
+
+        The gap between what an obligation says and what it reaches. A policy
+        promising de-identification while redacting `[pii, pci]` leaves every
+        `phi.*` identifier in the clear, and nothing in the response said so:
+        the obligation was discharged, honestly, and it simply did not reach
+        them. This is that difference as a number rather than an argument about
+        a description.
+
+        It is deliberately *not* folded into `unsupported_obligations`. An
+        enforcement point cannot be handed a duty no policy assigned it, and
+        doing so would refuse every ordinary call whose payload happens to carry
+        an uncovered label. Label names only, so ADR 0006 is untouched.
+        """
+        if not findings:
+            return []
+        redactor = Redactor.from_obligations(
+            [o.to_dict() for o in obligations if o.type == "redact"],
+            key=self._settings.redaction_key_bytes(),
+            vault=self._tokenizer,
+        )
+        return sorted({f.label for f in findings if redactor.rule_for(f.label) is None})
+
+    def _apply_redactions(
         self,
         payload: Any,
         obligations: Sequence[Obligation],
@@ -349,6 +429,7 @@ class PolicyDecisionPoint:
             determining_policy=decision.determining_policy,
             matched_policies=list(decision.matched_policies),
             obligations=[o.to_dict() for o in decision.obligations],
+            unsupported_obligations=list(response.unsupported_obligations),
             classifications=list(response.classifications),
             finding_count=len(findings),
             redaction_count=len(response.redactions),
@@ -375,6 +456,7 @@ class PolicyDecisionPoint:
                 "determining_policy": decision.determining_policy,
                 "matched_policies": list(decision.matched_policies),
                 "classifications": list(response.classifications),
+                "unsupported_obligations": list(response.unsupported_obligations),
                 "finding_count": len(findings),
                 "redaction_count": len(response.redactions),
                 "payload_digest": digest,

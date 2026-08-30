@@ -116,8 +116,19 @@ policies:
     name: Agents read with identifiers masked
     description: >
       The everyday grant. An agent may read the knowledge base and reason over
-      it; it may not learn who the records are about. Masking rather than
-      dropping keeps the surrounding text coherent, so answer quality survives.
+      it with the strong identifiers removed: social security, passport,
+      driving licence and national ID numbers are masked, and email addresses
+      and phone numbers are hashed so the same person stays recognisable as the
+      same person across a conversation. Masking rather than dropping keeps the
+      surrounding text coherent, so answer quality survives.
+
+      What it does not do is make the records anonymous, and this description
+      used to say that it did -- "it may not learn who the records are about",
+      above an obligation that leaves a name, a street address, a date of birth
+      and an MRN exactly where they were. Read as scoped: the identifiers named
+      above go, the rest of the record arrives intact, and this is a grant to
+      read data about people rather than a de-identification control. Anything
+      found and not covered is reported per decision in residual_labels.
     effect: allow
     priority: 200
     tags: [agents, default-grant]
@@ -238,12 +249,24 @@ policies:
         strategy: mask
 
   - key: allow-agents-external-inference-scrubbed
-    name: External inference on de-identified text only
+    name: External inference with identifiers hashed
     description: >
-      Sending a prompt to a third-party model is allowed once every direct
-      identifier is gone. Hashing rather than masking the contact fields keeps
-      the same person recognisable as the same person across a conversation,
-      without disclosing who they are.
+      Sending a prompt to a third-party model is allowed with every value the
+      scanner labels pii.*, pci.* or phi.* replaced by a keyed hash before it
+      leaves. Hashing rather than masking keeps the same person recognisable as
+      the same person across a conversation, without disclosing who they are.
+
+      Read that as what it says. It is not a claim of de-identification, and an
+      earlier version of this description made one: it asserted that "what
+      leaves the boundary is de-identified" while the obligation named only
+      [pii, pci], so an MRN, an NPI and an ICD-10 code went to the third-party
+      model verbatim. Adding phi is what closes that particular gap. What
+      remains open is the general one: this covers what the scanner finds, and
+      an identifier it does not find is one that leaves. That is not
+      hypothetical -- phi.icd10 only fires near a word like "diagnosis" or "dx",
+      so a bare code in a model's answer is not detected and so not hashed. The
+      response reports what was found and left uncovered in residual_labels;
+      that number, not this paragraph, is the evidence.
     effect: allow
     priority: 190
     tags: [agents, external]
@@ -254,7 +277,7 @@ policies:
         - context.destination: external
     obligations:
       - type: redact
-        labels: [pii, pci]
+        labels: [pii, pci, phi]
         strategy: hash
 
   - key: allow-analysts-read-unredacted

@@ -58,6 +58,7 @@ class AuditEvent(StrEnum):
     DECISION = "decision"
     DECISION_OUTCOME = "decision.outcome"
     DECISION_OUTCOME_CONFLICT = "decision.outcome_conflict"
+    DECISION_OUTCOME_CONTRADICTED = "decision.outcome_contradicted"
     POLICY_CREATED = "policy.created"
     POLICY_UPDATED = "policy.updated"
     POLICY_DELETED = "policy.deleted"

@@ -68,7 +68,10 @@ class Settings(BaseSettings):
         description="Ceiling on how much of a payload is classified. Beyond this "
         "the payload is scanned up to the limit and the decision is marked "
         "payload_truncated, so a clean result is never mistaken for a complete "
-        "one. Sized against wall-clock, not appetite: classification costs about "
+        "one. A structured payload has a second ceiling on the other axis -- "
+        "Scanner.max_depth -- and it marks the same flag, because a subtree "
+        "abandoned for depth reads exactly as clean as one that was scanned. "
+        "Sized against wall-clock, not appetite: classification costs about "
         "0.6 ms per KB, so 64 KiB is roughly 40 ms of CPU. The previous default "
         "of 1,000,000 was 600 ms -- long enough for one oversized payload to "
         "stall every other request sharing that worker.",
@@ -79,6 +82,17 @@ class Settings(BaseSettings):
         "CPU-bound and only partially releases the GIL, so this buys little "
         "throughput -- but it stops one large payload from blocking every "
         "concurrent request's I/O, which is what actually shows up as latency.",
+    )
+    max_request_min_confidence: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Ceiling on the min_confidence a request carrying a payload "
+        "may ask for. Identical to the schema default, so nothing that works "
+        "today changes: it forbids only the half of the range that weakens the "
+        "scan the decision is made from. A caller may always make the plane more "
+        "sensitive to what it sent; raising the floor discards the findings the "
+        "deny rules select on, which is the same bypass as disabling the scan.",
     )
     #: Fail closed if the policy engine errors. Turning this off trades safety for uptime.
     fail_closed: bool = True

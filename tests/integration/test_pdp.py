@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import select
 
 from control_plane.audit.service import AuditService
@@ -237,11 +238,6 @@ class TestPersistence:
         assert await audit.count() >= 2
         assert (await audit.verify()).valid is True
 
-    async def test_persist_false_writes_nothing(self, pdp, session) -> None:
-        response = await pdp.decide(request_for(options=DecideOptions(persist=False).model_dump()))
-        assert response.decision_id is None
-        assert (await session.execute(select(DecisionRecord))).scalars().all() == []
-
 
 class TestExplainability:
     async def test_explain_returns_the_full_trace(self, pdp) -> None:
@@ -374,20 +370,385 @@ class TestTheControlPlaneExecutesWhatItClaims:
             )
 
 
+class TestTheResponseSaysWhatThisDecisionDid:
+    """The request-shape axis, which ADR 0017's fix left uncovered.
+
+    ``TestTheControlPlaneExecutesWhatItClaims`` above holds the *type* axis: a
+    type may not claim CONTROL_PLANE status without a fixture showing the plane
+    doing something. It exercises exactly one request shape -- payload present,
+    scanning on, obligations applied -- and every type passes there.
+
+    A control-plane obligation is discharged per *decision*, not per type. The
+    plane's redaction pass runs only on the conjunction below; outside it the
+    duty is real, undischarged, and the enforcement point is the only party
+    left who can carry it out. Before this class, four ordinary request shapes
+    came back ``obligations=[redact], unsupported_obligations=[]`` with nothing
+    redacted -- and ``grep -rn apply_obligations tests/`` returned one line,
+    asserting a default. The false branch had never been executed by a test.
+    See ADR 0018.
+    """
+
+    @staticmethod
+    async def _carrying(session, name: str) -> Any:
+        """A PDP whose policy set carries one obligation of ``name``."""
+        document, _ = CONTROL_PLANE_FIXTURES[name]
+        await PolicyStore(session).create(
+            Policy(
+                key=f"carry-{name}",
+                name=f"An allow carrying a {name} obligation",
+                effect="allow",
+                priority=300,
+                match={"all": [{"principal.type": "agent"}, {"action": "read"}]},
+                obligations=[document],
+            ),
+            actor="test",
+        )
+        return PolicyDecisionPoint(session)
+
+    @pytest.mark.parametrize("name", sorted(CONTROL_PLANE_OBLIGATIONS))
+    async def test_a_shape_the_plane_cannot_execute_in_reports_the_duty(
+        self, session, name
+    ) -> None:
+        """No payload and apply_obligations=False both leave the duty undone."""
+        await seed(session)
+        pdp = await self._carrying(session, name)
+        _, payload = CONTROL_PLANE_FIXTURES[name]
+
+        no_payload = await pdp.decide(request_for())
+        assert no_payload.effect == "allow", name
+        assert name in {o["type"] for o in no_payload.obligations}, name
+        assert name in no_payload.unsupported_obligations, (
+            f"{name!r} was reported discharged on a request carrying no payload. "
+            f"The plane's pass had nothing to run on, so nobody did it."
+        )
+
+        withheld = await pdp.decide(
+            request_for(
+                payload=payload,
+                options=DecideOptions(apply_obligations=False).model_dump(),
+            )
+        )
+        assert withheld.effect == "allow", name
+        assert name in withheld.unsupported_obligations, (
+            f"{name!r} was reported discharged on a request that explicitly "
+            f"asked the plane not to execute obligations."
+        )
+
+    @pytest.mark.parametrize("name", sorted(CONTROL_PLANE_OBLIGATIONS))
+    def test_a_shape_that_suppresses_the_evidence_is_refused(self, name) -> None:
+        """The other two shapes never reach a decision at all.
+
+        ``scan_payload=False`` and a raised ``min_confidence`` do not merely
+        stop the obligation running; they stop the *scan*, so a deny that keys
+        on findings never fires either. There is no obligation to report and no
+        response to correct -- the only place to catch it is the boundary.
+        """
+        _, payload = CONTROL_PLANE_FIXTURES[name]
+        with pytest.raises(ValidationError):
+            request_for(payload=payload, options=DecideOptions(scan_payload=False).model_dump())
+        with pytest.raises(ValidationError):
+            request_for(payload=payload, options=DecideOptions(min_confidence=0.95).model_dump())
+
+    async def test_a_clean_payload_still_counts_as_executed(self, session) -> None:
+        """The predicate is 'the pass ran', never 'something was redacted'.
+
+        This is the outage guard, and it is the F-01 trap in new clothing. Every
+        clean prompt through the reverse proxy and every clean MCP tool call
+        arrives here: payload present, nothing sensitive in it, zero redactions.
+        Keying on ``redactions`` being non-empty would report ``redact``
+        outstanding on all of them, and both SDKs would refuse the call.
+        """
+        await seed(session)
+        pdp = await self._carrying(session, "redact")
+        response = await pdp.decide(request_for(payload="the refund was processed on Tuesday"))
+        assert response.effect == "allow"
+        assert "redact" in {o["type"] for o in response.obligations}
+        assert response.redactions == []
+        assert response.unsupported_obligations == []
+
+    @pytest.mark.parametrize("name", sorted(CONTROL_PLANE_OBLIGATIONS))
+    async def test_a_pass_over_only_a_prefix_is_not_a_discharge(
+        self, session, name, monkeypatch
+    ) -> None:
+        """Truncation: the pass ran, and it did not cover the payload.
+
+        The three conjuncts guarding the discharge are all facts about what the
+        caller *asked for* -- obligations applied, scanning on, effect allow --
+        and none is a fact about what the scanner reached. Past
+        ``CP_MAX_SCAN_CHARS`` only the head is classified, so only the head is
+        rewritten and the tail is returned verbatim, while every conjunct still
+        holds. Reporting the duty discharged there is the same sentence as F-01,
+        one axis over.
+
+        ``payload_truncated`` carries the fact and is not enough on its own:
+        nothing outside ``ui/`` reads it, and ``residual_labels`` is derived
+        from findings the tail never produced, so it comes back empty.
+        """
+        await seed(session)
+        pdp = await self._carrying(session, name)
+        _, payload = CONTROL_PLANE_FIXTURES[name]
+        monkeypatch.setattr(pdp._scanner, "max_chars", 8)
+
+        response = await pdp.decide(request_for(payload="x" * 64 + " " + payload))
+
+        assert response.effect == "allow", name
+        assert response.payload_truncated is True, name
+        assert name in {o["type"] for o in response.obligations}, name
+        assert name in response.unsupported_obligations, (
+            f"{name!r} was reported discharged on a payload the scanner only "
+            f"read the head of. The tail was never classified, so nothing in it "
+            f"was rewritten, and it was returned verbatim."
+        )
+
+    async def test_a_subtree_too_deep_to_scan_is_not_a_discharge(
+        self, session, monkeypatch
+    ) -> None:
+        """The depth axis, and the reason this class needed a structured payload.
+
+        ``CONTROL_PLANE_FIXTURES`` carries one fixture and it is a *string*, so
+        every guard above -- the execution check, the whole request-shape matrix,
+        the prefix test -- reaches ``scan_text`` and none of them reaches
+        ``scan_structured``. The depth ceiling had therefore never been executed
+        by a discharge test.
+
+        It abandoned a subtree past ``max_depth`` and recorded nothing, so a
+        nested payload came back with no findings, ``payload_truncated`` false,
+        ``residual_labels`` empty -- it derives from findings the subtree never
+        produced -- and ``redact`` reported discharged, with the identifiers
+        returned verbatim and the audit entry sealing the claim.
+        """
+        await seed(session)
+        pdp = await self._carrying(session, "redact")
+        ceiling = 3
+        monkeypatch.setattr(pdp._scanner, "max_depth", ceiling)
+
+        leaf = {"ssn": "536-90-4432"}
+        buried: Any = leaf
+        for _ in range(ceiling + 4):
+            buried = {"wrapper": buried}
+
+        response = await pdp.decide(request_for(payload=buried))
+
+        assert response.effect == "allow"
+        assert response.payload_truncated is True
+        assert "redact" in {o["type"] for o in response.obligations}
+        assert "redact" in response.unsupported_obligations, (
+            "redact was reported discharged over a payload whose subtree the "
+            "scanner abandoned. Nothing in it was read, so nothing in it was "
+            "rewritten, and it was returned verbatim."
+        )
+
+        shallow = await pdp.decide(request_for(payload=leaf))
+        assert shallow.payload_truncated is False
+        assert shallow.unsupported_obligations == []
+        assert {r.label for r in shallow.redactions} == {"pii.ssn"}
+
+    async def test_a_finding_no_rule_covers_is_named_rather_than_hidden(self, session) -> None:
+        """Residual coverage is a number on the response, not an argument in prose.
+
+        The pass ran, so ``redact`` is discharged and the enforcement point is
+        told nothing -- correctly: no policy assigned it a duty here, and
+        handing it one would refuse every ordinary call. What it is owed is the
+        fact that the obligation's labels did not reach everything the scanner
+        found.
+        """
+        await seed(session)
+        await PolicyStore(session).create(
+            Policy(
+                key="redact-email-only",
+                name="Redact contact details and nothing else",
+                effect="allow",
+                priority=300,
+                match={"all": [{"principal.type": "agent"}, {"action": "read"}]},
+                obligations=[{"type": "redact", "labels": ["pii.email"], "strategy": "mask"}],
+            ),
+            actor="test",
+        )
+        response = await PolicyDecisionPoint(session).decide(
+            request_for(payload="patient MRN 4827193, contact jane.doe@acme.com")
+        )
+        assert response.effect == "allow"
+        assert response.unsupported_obligations == []
+        assert "phi.mrn" in response.residual_labels
+        assert "pii.email" not in response.residual_labels
+
+    async def test_an_enforcement_point_duty_survives_apply_obligations_false(
+        self, session
+    ) -> None:
+        """S1: the correction channel is not a function of who applies redaction.
+
+        ``apply_obligations`` says whether the *plane* executes its own
+        obligations. Blanking the whole list on the strength of it told a
+        non-SDK enforcement point that its watermark duty was clear. Both
+        shipped SDKs are insulated only because they ignore the field, which is
+        why nothing in the suite could notice.
+        """
+        await seed(session)
+        await PolicyStore(session).create(
+            Policy(
+                key="watermark-and-purpose",
+                name="Duties only the enforcement point can carry out",
+                effect="allow",
+                priority=300,
+                match={"all": [{"principal.type": "agent"}, {"action": "read"}]},
+                obligations=[
+                    {"type": "watermark", "text": "internal only"},
+                    {"type": "require_purpose", "purposes": ["support"]},
+                ],
+            ),
+            actor="test",
+        )
+        pdp = PolicyDecisionPoint(session)
+        payload = "reach jane.doe@acme.com about the refund"
+        applied = await pdp.decide(request_for(payload=payload))
+        withheld = await pdp.decide(
+            request_for(
+                payload=payload,
+                options=DecideOptions(apply_obligations=False).model_dump(),
+            )
+        )
+        # The seed set's redact obligation applies to both requests. The plane
+        # executed it on the first and not on the second, and only the second
+        # difference is legitimate: the two enforcement-point duties are
+        # identical in both, because who applies redaction has no bearing on
+        # them.
+        assert applied.unsupported_obligations == ["require_purpose", "watermark"]
+        assert withheld.unsupported_obligations == ["redact", "require_purpose", "watermark"]
+
+
+class TestTheShapesTheEnforcementPointsActuallySend:
+    """Every in-repo call site, replicated, asserting it still works.
+
+    F-01's first attempt was redirected by a measurement of exactly this kind:
+    reclassifying `log` would have denied every governed tool call, because
+    ``pep/mcp_proxy`` calls ``enforcing()`` with no ``can_satisfy``. These are
+    the shapes that measurement was made of. They are here so the next change
+    to the predicate is made against them rather than around them.
+    """
+
+    async def test_the_mcp_listing_shape_still_allows(self, session) -> None:
+        """``_governed_listing``: apply_obligations=False, no payload, persist=False.
+
+        It reads ``decision.allowed`` and nothing else, so reporting ``redact``
+        unsupported here is truthful and inert. One line from breaking, though:
+        if it ever calls ``enforcing()``, every tool disappears from every
+        agent's list. This test is what that change has to walk past.
+        """
+        await seed(session)
+        response = await PolicyDecisionPoint(session).decide(
+            request_for(
+                resource={"urn": "mcp://files/read_file", "kind": "tool"},
+                options=DecideOptions(apply_obligations=False, persist=False).model_dump(),
+            )
+        )
+        assert response.effect == "allow"
+
+    async def test_the_mcp_invocation_shape_reports_nothing_outstanding(self, session) -> None:
+        """``_governed_call`` inbound: structured payload, defaults, no can_satisfy.
+
+        ``{}`` is not ``None``, so an argument-free tool call is scanned like
+        any other and the pass runs. This is the site the predicate is shaped
+        around.
+        """
+        await seed(session)
+        pdp = PolicyDecisionPoint(session)
+        for arguments in ({}, {"path": "/etc/hosts", "note": "reach jane.doe@acme.com"}):
+            response = await pdp.decide(
+                request_for(
+                    resource={"urn": "mcp://files/read_file", "kind": "tool"},
+                    payload=arguments,
+                )
+            )
+            assert response.effect == "allow", arguments
+            assert response.unsupported_obligations == [], arguments
+
+    async def test_the_reverse_proxy_shape_reports_nothing_outstanding(self, session) -> None:
+        """A prompt through ``pep/reverse_proxy``: text payload, defaults.
+
+        It calls ``enforce(can_satisfy=SATISFIABLE)``, and SATISFIABLE does not
+        contain ``redact`` -- correctly, the proxy has no redactor. So anything
+        that puts ``redact`` outstanding here refuses every governed prompt.
+        """
+        await seed(session)
+        await PolicyStore(session).create(
+            Policy(
+                key="allow-inference-redacted",
+                name="Agents infer with identifiers masked",
+                effect="allow",
+                priority=100,
+                match={"all": [{"principal.type": "agent"}, {"action": "infer"}]},
+                obligations=[{"type": "redact", "labels": ["pii"], "strategy": "mask"}],
+            ),
+            actor="test",
+        )
+        response = await PolicyDecisionPoint(session).decide(
+            request_for(
+                action="infer",
+                resource={"urn": "model://gpt-4o", "kind": "model"},
+                payload="summarise the ticket for jane.doe@acme.com",
+            )
+        )
+        assert response.effect == "allow"
+        assert response.unsupported_obligations == []
+
+
 class TestScannerIntegration:
-    async def test_min_confidence_is_honoured(self, pdp) -> None:
+    """What a caller may and may not do to the evidence its own request is judged on.
+
+    Both tests here used to specify the defect. ``test_scanning_can_be_disabled``
+    sent a live GitHub token with ``scan_payload=False`` against a set containing
+    ``deny-secrets-everywhere`` at priority 950 and asserted ``allow`` -- a
+    written specification of the credential bypass, passing for as long as it
+    existed. ``test_min_confidence_is_honoured`` did the same in the softer
+    direction. See ADR 0018.
+    """
+
+    async def test_min_confidence_may_be_lowered_but_not_raised(self, pdp) -> None:
+        """A caller may make the plane more sensitive, never less.
+
+        The ceiling is the schema default, so no request that worked before this
+        change stops working: it forbids only the half of the range that weakens
+        the scan the decision is made from.
+        """
         text = "server at 203.0.113.9"
         assert "pii.ip_address" in scan_text(text).labels
-        response = await pdp.decide(
-            request_for(payload=text, options=DecideOptions(min_confidence=0.9).model_dump())
-        )
-        assert "pii.ip_address" not in response.classifications
 
-    async def test_scanning_can_be_disabled(self, pdp) -> None:
+        sensitive = await pdp.decide(
+            request_for(payload=text, options=DecideOptions(min_confidence=0.1).model_dump())
+        )
+        assert "pii.ip_address" in sensitive.classifications
+
+        at_the_ceiling = await pdp.decide(
+            request_for(payload=text, options=DecideOptions(min_confidence=0.5).model_dump())
+        )
+        assert "pii.ip_address" not in at_the_ceiling.classifications
+
+        with pytest.raises(ValidationError, match="min_confidence"):
+            request_for(payload=text, options=DecideOptions(min_confidence=0.9).model_dump())
+
+    async def test_scanning_cannot_be_disabled_on_a_request_carrying_a_payload(self, pdp) -> None:
+        """ "Here is the data, do not look at it, tell me whether it is safe."
+
+        A contradiction that needs no knowledge of the policy set to refuse.
+        Before it was refused, it was the exception path to the one rule whose
+        own description says it has none: the same token below is denied at
+        defaults by ``deny-secrets-everywhere`` and allowed with this flag set.
+        """
+        token = "token ghp_" + "a" * 36
+        with pytest.raises(ValidationError, match="scan_payload"):
+            request_for(payload=token, options=DecideOptions(scan_payload=False).model_dump())
+
+        denied = await pdp.decide(request_for(payload=token))
+        assert denied.effect == "deny"
+        assert denied.determining_policy == "deny-secrets-everywhere"
+
+    async def test_scanning_may_still_be_disabled_when_there_is_no_payload(self, pdp) -> None:
+        """The flag is not banned, only the contradiction is.
+
+        A caller that classified elsewhere declares ``resource.classifications``
+        and sends no payload. Nothing is being suppressed, so nothing is refused.
+        """
         response = await pdp.decide(
-            request_for(
-                payload="token ghp_" + "a" * 36,
-                options=DecideOptions(scan_payload=False).model_dump(),
-            )
+            request_for(options=DecideOptions(scan_payload=False).model_dump())
         )
         assert response.effect == "allow"

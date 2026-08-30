@@ -51,18 +51,28 @@ class DecideOptions(BaseModel):
         default=True,
         description="Have the control plane execute redaction obligations and "
         "return the rewritten payload. Set false to receive the obligations and "
-        "carry them out at the enforcement point.",
+        "carry them out at the enforcement point. It changes who executes the "
+        "plane's own obligations, and nothing else: the response still reports "
+        "every obligation, and unsupported_obligations then names the redaction "
+        "the plane did not perform, because at that point nobody has.",
     )
     scan_payload: bool = Field(
         default=True,
         description="Classify the payload in this request and merge what is found "
-        "into the labels the policy sees.",
+        "into the labels the policy sees. May only be disabled on a request that "
+        "carries no payload -- a caller that classified the content elsewhere "
+        "declares resource.classifications instead. Sending content the plane is "
+        "forbidden to read is a contradiction, and the deny rules that select on "
+        "findings would never fire.",
     )
     min_confidence: float = Field(
         default=0.5,
         ge=0.0,
         le=1.0,
-        description="Discard findings below this confidence before policy evaluation.",
+        description="Discard findings below this confidence before policy evaluation. "
+        "On a request carrying a payload this may be lowered but not raised above "
+        "CP_MAX_REQUEST_MIN_CONFIDENCE: a caller may make the plane more sensitive "
+        "to what it sent, never less.",
     )
     persist: bool = Field(
         default=True,
@@ -98,6 +108,55 @@ class DecideRequest(BaseModel):
         "only applies to the exact request a human reviewed.",
     )
     options: DecideOptions = Field(default_factory=DecideOptions)
+
+    @model_validator(mode="after")
+    def _refuse_to_judge_evidence_it_was_told_to_suppress(self) -> Self:
+        """Reject a request that supplies content and disables the scan of it.
+
+        Every other defect in this area is a reporting defect: the decision was
+        right and the response described it wrongly, so the fix is on the wire.
+        This one is not. Both knobs below stop findings reaching the policy
+        engine at all, so a deny that selects on findings never fires -- there
+        is no obligation to report, and no response to correct. The only place
+        to catch it is here.
+
+        The scoping matters. Identity in the request body is already distrusted
+        three lines into the decide handler: a key scoped to one agent must not
+        be usable to speak for another. Evidentiary parameters in the same body
+        were not. Neither knob is banned -- a request with no payload may set
+        either, and `min_confidence` may still be lowered. What is refused is
+        the shape that makes the plane answer "is this safe" about bytes it was
+        told not to look at.
+
+        On the model rather than the handler so it holds for /v1/decide, for
+        /v1/simulate (which re-validates the same request, and so keeps showing
+        what the real endpoint would do), and for every direct construction.
+        See ADR 0018.
+        """
+        if self.payload is None:
+            return self
+        if not self.options.scan_payload:
+            raise ValueError(
+                "options.scan_payload cannot be false on a request that carries a "
+                "payload: the control plane would be asked whether content is safe "
+                "while forbidden to read it, and every policy selecting on findings "
+                "would be bypassed. Omit the payload and declare "
+                "resource.classifications instead"
+            )
+        # Imported here rather than at module scope: config imports nothing from
+        # schemas today, and a cycle between the two would be a nuisance to
+        # unpick later for the sake of one lookup on a validation path.
+        from control_plane.config import get_settings
+
+        ceiling = get_settings().max_request_min_confidence
+        if self.options.min_confidence > ceiling:
+            raise ValueError(
+                f"options.min_confidence of {self.options.min_confidence} exceeds the "
+                f"ceiling of {ceiling} for a request carrying a payload: raising it "
+                f"discards findings the deny rules select on, which is the same "
+                f"bypass as disabling the scan. Lowering it is always permitted"
+            )
+        return self
 
 
 class FindingOut(BaseModel):
@@ -180,8 +239,23 @@ class DecideResponse(BaseModel):
     redactions: list[RedactionOut] = Field(default_factory=list)
     unsupported_obligations: list[str] = Field(
         default_factory=list,
-        description="Obligation types the control plane could not execute itself. "
-        "The enforcement point must satisfy these or treat the decision as a deny.",
+        description="Obligation types this decision left undischarged. The "
+        "enforcement point must satisfy these or treat the decision as a deny. "
+        "Per decision, not per type: a type the control plane executes appears "
+        "here whenever this particular request was not one it executed it on -- "
+        "no payload to redact, or apply_obligations false. Always populated; it "
+        "is a correction channel, and a channel that goes quiet under some "
+        "request shapes is worse than none.",
+    )
+    residual_labels: list[str] = Field(
+        default_factory=list,
+        description="Labels found in the payload that the redaction obligations "
+        "did not cover, reported when the control plane ran its redaction pass. "
+        "The gap between what an obligation says and what it reaches: a policy "
+        "redacting [pii, pci] over a payload carrying phi.mrn discharges its "
+        "duty honestly and leaves the identifier in place. Label names only, "
+        "never values. Deliberately not an unsupported obligation -- no policy "
+        "assigned anyone this duty.",
     )
 
     route: dict[str, Any] | None = Field(

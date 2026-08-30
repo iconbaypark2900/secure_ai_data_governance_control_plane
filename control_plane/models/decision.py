@@ -46,6 +46,12 @@ class DecisionRecord(Base, UUIDPrimaryKey, TimestampMixin):
     determining_policy: Mapped[str | None] = mapped_column(String(128), nullable=True)
     matched_policies: Mapped[list[str]] = mapped_column(nullable=False, default=list)
     obligations: Mapped[list[dict[str, Any]]] = mapped_column(nullable=False, default=list)
+    #: Obligation types this decision left undischarged and handed to the
+    #: enforcement point. Stored beside the obligations themselves because the
+    #: two together are what makes an outcome report checkable: a report naming
+    #: one of these as discharged is a claim about the control plane's own
+    #: conduct, and this row is the only place that claim can be tested.
+    unsupported_obligations: Mapped[list[str]] = mapped_column(nullable=False, default=list)
 
     #: Labels the request carried or the scanner found, for aggregate reporting.
     classifications: Mapped[list[str]] = mapped_column(nullable=False, default=list)

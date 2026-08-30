@@ -384,6 +384,20 @@ def decide(
             console.print(f"[dim]regulations:[/] {', '.join(response.regulations)}")
         for obligation in response.obligations:
             console.print(f"[dim]obligation:[/] {json.dumps(obligation)}")
+        if response.unsupported_obligations:
+            # The half of the answer a policy author never saw here. An
+            # obligation printed above says what was required; this says who is
+            # still on the hook for it, and it is where the control plane's own
+            # `redact` shows up when this request was not one it could run on.
+            console.print(
+                f"[dim]outstanding (the enforcement point must satisfy these):[/] "
+                f"{', '.join(response.unsupported_obligations)}"
+            )
+        if response.residual_labels:
+            console.print(
+                f"[dim]found but not covered by any redaction rule:[/] "
+                f"{', '.join(response.residual_labels)}"
+            )
         if response.redactions:
             console.print(f"[dim]redactions:[/] {len(response.redactions)}")
         if response.payload is not None:

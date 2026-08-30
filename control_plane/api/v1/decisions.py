@@ -22,13 +22,18 @@ from control_plane.auth.keys import Scope
 from control_plane.classification.scanner import Scanner
 from control_plane.models.decision import DecisionRecord
 from control_plane.policy.engine import PolicyEngine
-from control_plane.policy.model import CombiningAlgorithm, Policy
+from control_plane.policy.model import (
+    CONTROL_PLANE_OBLIGATIONS,
+    CombiningAlgorithm,
+    Policy,
+)
 from control_plane.schemas.decision import (
     ClassifyRequest,
     ClassifyResponse,
     DecideRequest,
     DecideResponse,
     FindingOut,
+    Outcome,
     OutcomeOut,
     OutcomeReport,
     SimulateRequest,
@@ -350,13 +355,81 @@ async def report_outcome(
             ),
         )
 
-    record.outcome = str(body.outcome)
-    record.outcome_reason = body.reason
+    # The one part of an outcome report the server can check. Everything else
+    # here is the enforcement point's account of its own conduct, and it is
+    # right to take that on trust: the server was not there.
+    #
+    # The exception is a type the *control plane* is the declared executor of.
+    # For those the server was there, and it recorded whether it ran. A report
+    # claiming `redact` discharged, against a decision whose record says the
+    # plane declined to redact, is a claim about the plane's own conduct rather
+    # than the caller's -- and it is exactly what both SDKs produced before the
+    # response-side fix, from a static satisfiable set that never looked at the
+    # request.
+    #
+    # Scoped to CONTROL_PLANE_OBLIGATIONS deliberately. An enforcement-point
+    # duty in `unsupported_obligations` is not a contradiction to discharge; it
+    # is an instruction to. The reference proxy is handed `watermark`, applies
+    # it, and reports it discharged -- that is the mechanism working, and
+    # flagging it would turn every correct enforcement into a recorded
+    # discrepancy.
+    #
+    # Corrected rather than refused. A 4xx here would leave the outcome
+    # unreported, which is the gap `outcome IS NULL` exists to surface -- the
+    # report would simply vanish, and with it the fact that a duty is going
+    # undischarged in production. So the report is recorded with the
+    # contradicted types moved to where they belong, the outcome downgraded to
+    # the honest one, and the discrepancy sealed.
+    #
+    # After the response-side fix this is unreachable from either shipped SDK:
+    # `redact` outstanding raises before any outcome is reported. It exists for
+    # the enforcement point that ignores the wire, and it is the only thing
+    # protecting the durable record from one. See ADR 0018.
+    discharged = sorted(set(body.discharged))
+    undischarged = sorted(set(body.undischarged))
+    contradicted = sorted(
+        set(discharged) & set(record.unsupported_obligations or []) & CONTROL_PLANE_OBLIGATIONS
+    )
+    submitted_outcome = str(body.outcome)
+    if contradicted:
+        discharged = [t for t in discharged if t not in set(contradicted)]
+        undischarged = sorted(set(undischarged) | set(contradicted))
+        outcome = str(Outcome.PARTIAL)
+        reason = "; ".join(
+            part
+            for part in (
+                body.reason,
+                f"corrected by the control plane: {', '.join(contradicted)} was "
+                f"reported discharged, and this decision recorded it as handed to "
+                f"the enforcement point undischarged",
+            )
+            if part
+        )
+    else:
+        outcome = submitted_outcome
+        reason = body.reason
+
+    record.outcome = outcome
+    record.outcome_reason = reason
     record.outcome_reported_at = datetime.now(UTC)
     record.outcome_reported_by = caller.identity
-    record.discharged = sorted(set(body.discharged))
-    record.undischarged = sorted(set(body.undischarged))
+    record.discharged = discharged
+    record.undischarged = undischarged
     await session.flush()
+
+    if contradicted:
+        await audit.append(
+            AuditEvent.DECISION_OUTCOME_CONTRADICTED,
+            actor=caller.identity,
+            subject=str(decision_id),
+            payload={
+                "contradicted": contradicted,
+                "submitted_outcome": submitted_outcome,
+                "submitted_discharged": sorted(set(body.discharged)),
+                "recorded_outcome": record.outcome,
+                "unsupported_obligations": list(record.unsupported_obligations or []),
+            },
+        )
 
     await audit.append(
         AuditEvent.DECISION_OUTCOME,

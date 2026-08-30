@@ -289,3 +289,110 @@ class TestTheIdentifierIsUsableImmediately:
             f"/v1/approvals/{approval_id}/decide?grant=true", json={"note": "ok"}
         )
         assert resolved.status_code == 200
+
+
+class TestTheRecordCannotBeMadeToLie:
+    """A discharge the control plane's own record contradicts.
+
+    Everything above trusts the enforcement point's account of what it did,
+    which is right: the server was not there. The exception is a type the plane
+    is the declared executor of. For those the server *was* there, and the
+    decision row records whether it ran -- so a report claiming `redact`
+    discharged against a decision where the plane declined to redact is a claim
+    about the plane's own conduct, not the caller's.
+
+    That is precisely what both SDKs produced before the response-side fix, from
+    a static satisfiable set consulted with no reference to the request: a false
+    discharge written into the durable record for a redaction that provably did
+    not happen. It is not refused -- an outcome refused outright is an outcome
+    unreported, the gap `outcome IS NULL` exists to surface -- it is recorded,
+    corrected, and sealed.
+
+    An enforcement-point duty in `unsupported_obligations` is not contradicted
+    by being discharged; it is an instruction to discharge it, and the tests
+    above cover the proxy doing exactly that. See ADR 0018.
+    """
+
+    #: An allow carrying a duty the plane executes itself, asked without a
+    #: payload -- so there is nothing to redact and the plane records that it
+    #: handed the duty on.
+    UNRUN = {
+        "policy": {
+            "key": "allow-with-a-redaction",
+            "name": "Allowed, subject to redaction",
+            "effect": "allow",
+            "priority": 100,
+            "match": {"action": "read"},
+            "obligations": [{"type": "redact", "labels": ["pii"], "strategy": "mask"}],
+        }
+    }
+
+    @pytest.fixture
+    async def undischargeable(self, client):
+        await client.post("/v1/policies", json=self.UNRUN)
+        response = await client.post("/v1/decide", json=decide_body())
+        body = response.json()
+        assert body["unsupported_obligations"] == ["redact"]
+        return client, body["decision_id"]
+
+    async def test_a_discharge_the_plane_contradicts_is_corrected(self, undischargeable) -> None:
+        client, decision_id = undischargeable
+        response = await client.post(
+            f"/v1/decisions/{decision_id}/outcome",
+            json={"outcome": "enforced", "discharged": ["redact"]},
+        )
+        assert response.status_code == 200
+        recorded = response.json()
+        assert recorded["outcome"] == "partial"
+        assert recorded["discharged"] == []
+        assert recorded["undischarged"] == ["redact"]
+        assert "corrected by the control plane" in recorded["reason"]
+
+    async def test_the_contradiction_is_sealed(self, undischargeable) -> None:
+        client, decision_id = undischargeable
+        await client.post(
+            f"/v1/decisions/{decision_id}/outcome",
+            json={"outcome": "enforced", "discharged": ["redact"]},
+        )
+        events = (await client.get("/v1/audit")).json()
+        sealed = next(i for i in events["items"] if i["event"] == "decision.outcome_contradicted")
+        assert sealed["payload"]["contradicted"] == ["redact"]
+        assert sealed["payload"]["submitted_outcome"] == "enforced"
+        assert sealed["payload"]["recorded_outcome"] == "partial"
+
+    async def test_an_honest_report_of_the_same_decision_is_untouched(
+        self, undischargeable
+    ) -> None:
+        """The correction fires on the contradiction, not on the obligation."""
+        client, decision_id = undischargeable
+        response = await client.post(
+            f"/v1/decisions/{decision_id}/outcome",
+            json={
+                "outcome": "partial",
+                "reason": "this proxy has no redactor",
+                "undischarged": ["redact"],
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["outcome"] == "partial"
+        events = (await client.get("/v1/audit")).json()
+        assert not [i for i in events["items"] if i["event"] == "decision.outcome_contradicted"]
+
+    async def test_an_enforcement_point_duty_is_not_a_contradiction(self, decided) -> None:
+        """The reference proxy is *told* to watermark. Doing it is not a discrepancy.
+
+        `unsupported_obligations` names duties handed to the enforcement point.
+        Discharging one is the mechanism working. Flagging it would turn every
+        correct enforcement in production into a recorded contradiction, which
+        is the criterion this correction had to be scoped against.
+        """
+        client, decision_id = decided
+        response = await client.post(
+            f"/v1/decisions/{decision_id}/outcome",
+            json={"outcome": "enforced", "discharged": ["watermark"]},
+        )
+        assert response.status_code == 200
+        assert response.json()["outcome"] == "enforced"
+        assert response.json()["discharged"] == ["watermark"]
+        events = (await client.get("/v1/audit")).json()
+        assert not [i for i in events["items"] if i["event"] == "decision.outcome_contradicted"]

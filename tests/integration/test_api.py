@@ -241,6 +241,44 @@ class TestDecisionEndpoint:
         body = (await seeded.post("/v1/decide", json=decide_body(options={"explain": True}))).json()
         assert body["explain"]["trace"]
 
+    async def test_a_request_that_suppresses_its_own_evidence_is_a_422(self, seeded) -> None:
+        """FastAPI turns the model validator into a 422, on both endpoints.
+
+        Put on `DecideRequest` rather than in the handler for exactly this: the
+        refusal has to hold wherever a decision is asked for, and /v1/simulate
+        has to keep showing what the real endpoint would do rather than becoming
+        a way to ask the forbidden question and read the answer.
+        """
+        token = "ghp_" + "a" * 36
+        denied = (await seeded.post("/v1/decide", json=decide_body(payload=token))).json()
+        assert denied["effect"] == "deny"
+
+        for options in ({"scan_payload": False}, {"min_confidence": 0.95}):
+            suppressed = await seeded.post(
+                "/v1/decide", json=decide_body(payload=token, options=options)
+            )
+            assert suppressed.status_code == 422, options
+            simulated = await seeded.post(
+                "/v1/simulate",
+                json={"request": decide_body(payload=token, options=options)},
+            )
+            assert simulated.status_code == 422, options
+
+    async def test_the_response_says_what_this_decision_left_undone(self, seeded) -> None:
+        """The wire contract, at the level a non-SDK enforcement point reads it."""
+        ran = (
+            await seeded.post("/v1/decide", json=decide_body(payload="write to jane.doe@acme.com"))
+        ).json()
+        assert ran["unsupported_obligations"] == []
+
+        # No payload, and obligations withheld. Two shapes the plane cannot
+        # redact in, and it now says so instead of reporting the duty done.
+        for options in ({}, {"apply_obligations": False}):
+            undone = (await seeded.post("/v1/decide", json=decide_body(options=options))).json()
+            assert undone["effect"] == "allow", options
+            assert "redact" in {o["type"] for o in undone["obligations"]}, options
+            assert undone["unsupported_obligations"] == ["redact"], options
+
     async def test_classify_endpoint_reports_without_deciding(self, client) -> None:
         body = (
             await client.post(

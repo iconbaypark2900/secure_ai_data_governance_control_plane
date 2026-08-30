@@ -110,6 +110,8 @@ curl -X POST localhost:8000/v1/decide -H 'X-API-Key: cpk_…' -d '{
     {"label": "pii.email", "strategy": "hash",  "start": 9,  "end": 26},
     {"label": "pii.ssn",   "strategy": "mask",  "start": 32, "end": 43}
   ],
+  "unsupported_obligations": [],
+  "residual_labels": [],
   "latency_ms": 6.6
 }
 ```
@@ -119,6 +121,19 @@ sentence still parses. The email is **hashed** — also gone, but deterministica
 so the same customer stays recognisable as the same customer across a
 conversation without the agent ever learning who they are. Choosing between those
 two is what a redaction obligation is for.
+
+Then note the two empty arrays, because they are the part that is easy to skip
+and they are load-bearing. `unsupported_obligations` is what this decision left
+for the enforcement point to do; it is empty here because the plane ran its
+redaction pass on this request. Send the same question with no payload, or with
+`apply_obligations: false`, and it reads `["redact"]` — the obligation is still
+required, and on that request nobody has carried it out. It is a fact about the
+decision, not about the obligation type, and reporting it per type is how a
+plane comes to tell an enforcement point that a duty is clear when nothing
+discharged it. `residual_labels` names what the scan found that the redaction
+rules did not cover, which is how a claim like "identifiers are removed" gets
+checked against a number instead of read in a description. See
+[ADR 0018](docs/adr/0018-an-obligation-is-discharged-per-decision.md).
 
 ---
 

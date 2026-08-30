@@ -24,6 +24,7 @@ __all__ = ["Finding", "ScanResult", "Scanner", "scan_structured", "scan_text"]
 
 #: Hard ceiling on a single scan, so an oversized payload cannot pin a worker.
 DEFAULT_MAX_CHARS = 1_000_000
+DEFAULT_MAX_DEPTH = 24
 
 
 def mask_preview(value: str) -> str:
@@ -165,6 +166,11 @@ class Scanner:
 
     detectors: tuple[Detector, ...] = DETECTORS
     max_chars: int = DEFAULT_MAX_CHARS
+    #: How deep ``scan_structured`` will walk before abandoning a subtree. The
+    #: twin of ``max_chars`` on the other axis, and it marks ``truncated`` the
+    #: same way -- silently skipping is what let a nested payload come back
+    #: reading clean.
+    max_depth: int = DEFAULT_MAX_DEPTH
     #: Findings below this confidence are discarded before overlap resolution.
     min_confidence: float = 0.0
     _index: dict[str, Detector] = field(init=False, repr=False, default_factory=dict)
@@ -212,21 +218,30 @@ class Scanner:
             detectors_run=len(self.detectors),
         )
 
-    def scan_structured(self, payload: Any, *, max_depth: int = 24) -> ScanResult:
+    def scan_structured(self, payload: Any, *, max_depth: int | None = None) -> ScanResult:
         """Walk a JSON-like structure, scanning every string leaf.
 
         Each leaf is scanned with its own field name as a context hint, so
         ``{"ssn": "536904432"}`` is recognised even though the digits alone carry
         no evidence of what they are. Offsets in the returned findings are
         relative to the leaf string, and ``path`` is the JSON pointer to it.
+
+        Abandoning a subtree past ``max_depth`` sets ``truncated``, for the same
+        reason the character ceiling does: an unscanned subtree produces no
+        findings, and a caller cannot tell that apart from a clean one. It read
+        as clean, ``payload_truncated`` was false, ``residual_labels`` was empty
+        because it derives from findings the subtree never produced, and the
+        decision reported ``redact`` discharged over content nobody looked at.
         """
+        limit = self.max_depth if max_depth is None else max_depth
         findings: list[Finding] = []
         scanned = 0
         truncated = False
 
         def walk(node: Any, pointer: str, hint: str, depth: int) -> None:
             nonlocal scanned, truncated
-            if depth > max_depth:
+            if depth > limit:
+                truncated = True
                 return
             if isinstance(node, str):
                 result = self.scan_text(node, context_hint=hint, path=pointer)

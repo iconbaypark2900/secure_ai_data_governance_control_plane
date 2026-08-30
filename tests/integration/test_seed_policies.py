@@ -7,6 +7,7 @@ none, because people copy it. These tests are the check on that.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -398,3 +399,167 @@ class TestPostureAsAWhole:
         stored = {record.key for record in await store.list_records(limit=100)}
         catalog_keys = {p["key"] for p in yaml.safe_load(POLICIES.read_text())["policies"]}
         assert stored == catalog_keys
+
+
+#: Every shipped policy whose description makes a claim about identifiers, with
+#: the request that exercises the claim and the strings that must not survive it.
+#:
+#: This is the table the file's own opening sentence promised and did not have.
+#: The 23 tests above it assert set membership over obligation *types* -- that a
+#: `redact` is attached, that no unimplemented type is -- and `grep -n
+#: description` over them returns one hit, the module docstring. A type being
+#: attached says nothing about what it reaches: the external-inference grant
+#: carried `redact` over `[pii, pci]` while its description asserted that what
+#: leaves the boundary is de-identified, and an MRN, an NPI and an ICD-10 code
+#: went to the third-party model in the clear. Every one of those 23 passed.
+#:
+#: A row is added here whenever a description says an identifier class does not
+#: leave. If the sentence is not worth checking, it is not worth writing: the
+#: alternative -- and the mistake ADR 0017's fix made -- is to delete an inert
+#: obligation and assert its content as prose, which moves the claim from a
+#: place something can check to a place nothing can.
+DE_IDENTIFICATION_CLAIMS: list[dict[str, Any]] = [
+    {
+        "policy": "allow-agents-external-inference-scrubbed",
+        "claim": "every value labelled pii.*, pci.* or phi.* is hashed before it leaves",
+        "request": {
+            "principal": "agent:support_bot",
+            "action": "infer",
+            "context": {"destination": "external"},
+        },
+        "payload": (
+            "Patient chart: MRN 4827193, provider NPI 1245319599, diagnosis E11.9, "
+            "contact jane.doe@acme.com on 415-555-0142, SSN 536-90-4432."
+        ),
+        "must_not_survive": [
+            "4827193",
+            "1245319599",
+            "E11.9",
+            "jane.doe@acme.com",
+            "415-555-0142",
+            "536-90-4432",
+        ],
+    },
+    {
+        "policy": "allow-agents-external-inference-scrubbed",
+        "claim": "the same, on the return leg -- a model's answer crosses the same boundary",
+        "request": {
+            "principal": "agent:support_bot",
+            "action": "return",
+            "context": {"destination": "external"},
+        },
+        "payload": ("Their MRN is 4827193, diagnosis E11.9; reach them at jane.doe@acme.com."),
+        "must_not_survive": ["4827193", "E11.9", "jane.doe@acme.com"],
+    },
+    {
+        "policy": "allow-agents-read-redacted",
+        "claim": (
+            "social security, passport, driving licence and national ID numbers are "
+            "masked; email addresses and phone numbers are hashed"
+        ),
+        "request": {
+            "principal": "agent:support_bot",
+            "action": "read",
+            "resource": "qdrant://kb_docs",
+        },
+        "payload": (
+            "Customer jane.doe@acme.com, phone 415-555-0142, SSN 536-90-4432, passport 990000000."
+        ),
+        "must_not_survive": ["jane.doe@acme.com", "415-555-0142", "536-90-4432"],
+    },
+]
+
+
+class TestTheDescriptionsAreChecked:
+    """The guard whose absence let a false claim ship.
+
+    Descriptions are not documentation here; they are the reason people copy
+    this set, and a sentence in one is what a reader will believe over the
+    obligation three lines below it. So each row of the table above drives the
+    real policy set with a payload carrying the identifier class its
+    description names, and looks at what came back.
+
+    Where the two disagree, the rule is: widen the obligation where data crosses
+    the trust boundary, correct the description where it does not. Never widen a
+    deny -- that is the move that breaks live callers, and it is what redirected
+    the previous attempt.
+    """
+
+    @pytest.mark.parametrize(
+        "case", DE_IDENTIFICATION_CLAIMS, ids=lambda c: f"{c['policy']}:{c['request']['action']}"
+    )
+    async def test_the_identifiers_a_description_names_do_not_come_back(
+        self, reference, case
+    ) -> None:
+        response = await ask(reference, payload=case["payload"], **case["request"])
+        assert response.effect == "allow", case["claim"]
+        assert case["policy"] in response.matched_policies, (
+            f"{case['policy']} did not even apply to the request written to "
+            f"exercise it, so this row is checking nothing. Matched: "
+            f"{response.matched_policies}"
+        )
+        returned = str(response.payload)
+        survived = [value for value in case["must_not_survive"] if value in returned]
+        assert not survived, (
+            f"{case['policy']} says: {case['claim']}. It returned {survived} "
+            f"verbatim. Either the obligation has to reach them or the sentence "
+            f"has to stop saying it does."
+        )
+
+    async def test_what_the_obligations_missed_is_reported_rather_than_argued(
+        self, reference
+    ) -> None:
+        """The general half, which no wording can settle.
+
+        A description can only be true about the labels the scanner has a
+        detector for. What it cannot promise is that nothing else got through --
+        so the response says, per decision, which findings the redaction rules
+        did not cover. That number is what makes the next version of this
+        argument a measurement instead of a reading.
+        """
+        covered = await ask(
+            reference,
+            principal="agent:support_bot",
+            action="infer",
+            context={"destination": "external"},
+            payload="MRN 4827193 and jane.doe@acme.com",
+        )
+        assert covered.residual_labels == []
+
+        # The everyday internal grant redacts contact and strong-ID labels only,
+        # exactly as its description now says -- so an MRN in the payload is
+        # left in place, and reported.
+        uncovered = await ask(
+            reference,
+            principal="agent:support_bot",
+            action="read",
+            resource="qdrant://kb_docs",
+            payload="MRN 4827193 and jane.doe@acme.com",
+        )
+        assert uncovered.effect == "allow"
+        assert "phi.mrn" in uncovered.residual_labels
+        assert "pii.email" not in uncovered.residual_labels
+
+    async def test_the_claim_is_bounded_by_what_the_scanner_can_find(self, reference) -> None:
+        """Why the description says "every value the scanner labels" and not "every value".
+
+        Found by writing the row above. `phi.icd10` only fires near a context
+        word -- "diagnosis", "dx", "coded as" -- so a bare E11.9 in a model's
+        answer is never detected, and a redaction obligation cannot hash what
+        was never found. No wording of the policy fixes that and no obligation
+        reaches it; it is a detector limit, and the sentence is written to be
+        true in its presence rather than to paper over it.
+
+        Pinned so that the day the detector improves, this test fails and the
+        description can be widened on evidence.
+        """
+        bare = await ask(
+            reference,
+            principal="agent:support_bot",
+            action="return",
+            context={"destination": "external"},
+            payload="Their code is E11.9.",
+        )
+        assert bare.effect == "allow"
+        assert "E11.9" in str(bare.payload)
+        assert bare.residual_labels == []

@@ -469,6 +469,28 @@ async def _stream(
         yield sse(DONE)
 
     if refused is None:
+        # KNOWN DEFECT -- this report overclaims on the streaming path, and
+        # says so here rather than in a comment asserting the opposite.
+        #
+        # `discharged=inbound.obligation_types()` names every type on the
+        # decision. On the non-streaming path that is earned: line 362 calls
+        # `apply_response_obligations`, which is the only code that applies a
+        # watermark or a max_bytes/max_results cap. Neither `_stream` nor
+        # `_stream_buffered` calls it, and `apply_request_obligations` covers
+        # only `limit.max_tokens`. So a streamed response carrying `watermark`
+        # or a byte cap reports both enforced while applying neither -- measured
+        # at 71 characters delivered under a 20-byte cap with no watermark in
+        # the output, against the same decision the non-streaming branch
+        # truncates and marks correctly.
+        #
+        # Clearing `enforce(can_satisfy=SATISFIABLE)` above does not close it:
+        # that check asks whether this proxy *may* satisfy those types, not
+        # whether this code path did. `stream: true` is what a chat client
+        # actually sends, so this is the common path, not the edge.
+        #
+        # Fix is to call `apply_response_obligations` from both stream
+        # generators and report only what came back applied. Until then the
+        # honest report is the applied set, not the declared one.
         await _control_plane.report_outcome(
             inbound, "enforced", discharged=inbound.obligation_types()
         )
