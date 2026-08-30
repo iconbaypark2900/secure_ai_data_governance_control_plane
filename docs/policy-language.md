@@ -279,21 +279,29 @@ that buys and what it costs.
 
 | type | fields | who executes it |
 |---|---|---|
-| `redact` | `labels`, `strategy`, `keep_last`, `hash_length` | control plane |
-| `annotate` | `note` | control plane |
-| `log` | `level` | control plane |
-| `ttl` | `seconds` | control plane |
+| `redact` | `labels`, `strategy`, `keep_last`, `hash_length` | control plane, *when the request lets it* |
 | `limit` | one of `max_rows`, `max_bytes`, `max_tokens`, `max_results` | enforcement point |
 | `watermark` | `text` | enforcement point |
 | `require_purpose` | `purposes` | enforcement point |
 | `route` | `to` and/or `require` | enforcement point |
 
 That is the whole list, and an unknown type is a **422 when you write the
-policy** rather than a surprise at decision time. `notify` and `route` were both
-removed at one point because nothing implemented them — writing one produced a
-well-formed policy that denied your own traffic. `route` came back only once
-something honoured it; `notify` has not. See
-[ADR 0010](adr/0010-declare-only-what-is-implemented.md).
+policy** rather than a surprise at decision time. Five names have been taken out
+of it. `notify` and `route` went because nothing implemented them — writing one
+produced a well-formed policy that denied your own traffic; `route` came back
+once something honoured it, `notify` has not. `annotate`, `log` and `ttl` went
+for the mirror-image reason: they named the control plane as their executor, and
+the control plane executed none of them, so instead of denying your traffic they
+quietly did nothing while every enforcement point was told they were already
+taken care of. See [ADR 0010](adr/0010-declare-only-what-is-implemented.md) for
+the rule and [ADR 0017](adr/0017-the-control-plane-executes-one-obligation.md)
+for the half of it that had never been mechanised.
+
+If you were using `annotate` to leave a note on a decision, put it in the
+policy's `description`: it is stored, versioned, diffable, and it appears in the
+explain trace next to the rule it belongs to. If you were using `log`, nothing is
+lost — every decision already writes a decision record and seals an audit event
+against the principal's name, with no obligation needed to ask for it.
 
 ### `route`
 

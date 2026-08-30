@@ -47,7 +47,7 @@ DEFAULT_TIMEOUT = 5.0
 DEFAULT_RETRIES = 2
 #: Obligations this client can satisfy on the caller's behalf, because the
 #: control plane already applied them to the returned payload.
-SATISFIED_BY_CONTROL_PLANE = frozenset({"redact", "annotate", "log", "ttl"})
+SATISFIED_BY_CONTROL_PLANE = frozenset({"redact"})
 
 
 class Outcome:

@@ -13,7 +13,11 @@ import yaml
 
 from control_plane.catalog.service import CatalogService
 from control_plane.pdp import PolicyDecisionPoint
-from control_plane.policy.model import PolicySet
+from control_plane.policy.model import (
+    CONTROL_PLANE_OBLIGATIONS,
+    KNOWN_OBLIGATIONS,
+    PolicySet,
+)
 from control_plane.policy.store import PolicyStore
 from control_plane.schemas.decision import DecideRequest
 
@@ -366,6 +370,27 @@ class TestPostureAsAWhole:
     async def test_every_shipped_policy_parses(self) -> None:
         policy_set = PolicySet.model_validate(yaml.safe_load(POLICIES.read_text()))
         assert len(policy_set.policies) >= 10
+
+    async def test_every_shipped_obligation_is_one_something_carries_out(self) -> None:
+        """The reference set is the thing people copy, so it must not overclaim.
+
+        Free, and it would have caught this: the shipped set attached `log` to
+        three grants and `annotate` to a fourth, and nothing anywhere executed
+        either. Cheaper than the schema check alone, because a type can be
+        removed from OBLIGATION_SPECS while the YAML that used it stays behind
+        and is only noticed when someone runs the seed.
+        """
+        import sys
+
+        sys.path.insert(0, str(ROOT))
+        from pep.reverse_proxy.obligations import SATISFIABLE
+
+        policy_set = PolicySet.model_validate(yaml.safe_load(POLICIES.read_text()))
+        attached = {o.type for policy in policy_set.policies for o in policy.obligations}
+        assert attached <= KNOWN_OBLIGATIONS
+        # Someone has to carry each one: this plane, or the reference proxy.
+        # Anything else is a shipped policy that denies its own traffic.
+        assert attached <= CONTROL_PLANE_OBLIGATIONS | SATISFIABLE
 
     async def test_every_shipped_policy_is_reachable(self, reference, session) -> None:
         """A policy nothing can ever match is dead weight and misleading."""

@@ -134,8 +134,6 @@ policies:
       - type: redact
         labels: [pii.email, pii.phone]
         strategy: hash
-      - type: log
-        level: info
 
   - key: allow-model-responses-back-redacted
     name: A model's answer reaches the agent with identifiers masked
@@ -172,8 +170,6 @@ policies:
       - type: redact
         labels: [pii.email, pii.phone]
         strategy: hash
-      - type: log
-        level: info
 
   - key: allow-tool-results-back-redacted
     name: Tool results reach the agent with identifiers masked
@@ -209,8 +205,6 @@ policies:
       - type: redact
         labels: [pii.email, pii.phone]
         strategy: hash
-      - type: log
-        level: info
 
   - key: route-regulated-data-to-eu-models
     name: Regulated data is inferred inside the EU
@@ -262,8 +256,6 @@ policies:
       - type: redact
         labels: [pii, pci]
         strategy: hash
-      - type: annotate
-        note: de-identified before leaving the boundary
 
   - key: allow-analysts-read-unredacted
     name: Cleared analysts see the real values
@@ -279,9 +271,6 @@ policies:
         - principal.type: user
         - principal.trust_tier: high
         - action: {in: [read, query, search]}
-    obligations:
-      - type: log
-        level: notice
 
   - key: allow-public-data-freely
     name: Public data is not governed

@@ -73,6 +73,14 @@ APPROVAL_TTL = timedelta(hours=24)
 #: to the enforcement point, which must satisfy it or deny. Imported rather than
 #: restated: two copies of this set would eventually disagree, and the direction
 #: they would disagree in is a duty silently going unenforced.
+#:
+#: One type, by measurement rather than by omission. ``_apply_redactions`` below
+#: is the whole of what this plane executes, and for three releases the set said
+#: four -- so ``annotate``, ``log`` and ``ttl`` reached every enforcement point
+#: as duties already discharged by someone who had never touched them. The
+#: import kept the schema and this set honest with each other; neither was tied
+#: to the code. ``test_every_control_plane_obligation_visibly_executes`` is the
+#: tie. See ADR 0017.
 SELF_EXECUTABLE = CONTROL_PLANE_OBLIGATIONS
 
 

@@ -26,7 +26,7 @@ const decision = await cp.decide({
 
 decision.effect;             // "allow"
 decision.payload;            // "Refund <pii.email:68ccacd2…>, SSN [REDACTED:pii.ssn]."
-decision.obligationTypes();  // ["log", "redact", "route"]
+decision.obligationTypes();  // ["redact"]
 ```
 
 ## Enforcing
@@ -64,8 +64,8 @@ unchecked. Pass `failClosed: false` only knowingly.
 **Obligations are binding.** `decision.enforce()` throws `ObligationUnsatisfied`
 for any duty this enforcement point has not declared it can carry out. "Allow,
 but redact the SSNs" must never degrade into "allow". The control plane applies
-`redact`, `annotate`, `log` and `ttl` itself; anything else is yours to declare
-in `canSatisfy`.
+`redact` itself, and nothing else; every other type is yours to declare in
+`canSatisfy`.
 
 **Only the pure authorisation question is cached.** A decision carrying a payload
 is never cached, because the payload is part of what was decided. Neither is an

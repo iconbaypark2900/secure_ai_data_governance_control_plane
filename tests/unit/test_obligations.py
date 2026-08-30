@@ -30,7 +30,7 @@ class TestTheSupportedSet:
     def test_the_control_plane_set_is_derived_not_duplicated(self) -> None:
         """Two copies would drift, and the drift means a duty going unenforced."""
         assert SELF_EXECUTABLE is CONTROL_PLANE_OBLIGATIONS
-        assert {"redact", "annotate", "log", "ttl"} == CONTROL_PLANE_OBLIGATIONS
+        assert {"redact"} == CONTROL_PLANE_OBLIGATIONS
 
     def test_the_enforcement_point_set_is_what_the_reference_pep_implements(self) -> None:
         import sys
@@ -41,8 +41,15 @@ class TestTheSupportedSet:
 
         assert KNOWN_OBLIGATIONS - CONTROL_PLANE_OBLIGATIONS == SATISFIABLE
 
-    @pytest.mark.parametrize("removed", ["notify"])
+    @pytest.mark.parametrize("removed", ["notify", "annotate", "log", "ttl"])
     def test_types_nothing_implements_were_removed(self, removed: str) -> None:
+        """Both halves of the rule, in one list.
+
+        `notify` had no enforcement point behind it. `annotate`, `log` and `ttl`
+        had no control plane behind them -- which was harder to see, because a
+        control-plane obligation is reported as already discharged and so nobody
+        was ever told it went uncarried. See ADR 0017.
+        """
         assert removed not in KNOWN_OBLIGATIONS
 
     def test_route_came_back_only_once_something_implemented_it(self) -> None:
@@ -78,9 +85,9 @@ class TestValidation:
             ({"type": "require_purpose"}, "at least one of"),
             ({"type": "require_purpose", "purposes": "support"}, "as a list"),
             ({"type": "require_purpose", "purposes": []}, "permits nothing"),
-            ({"type": "ttl"}, "at least one of"),
-            ({"type": "ttl", "seconds": 0}, "positive integer"),
-            ({"type": "ttl", "seconds": "an hour"}, "positive integer"),
+            ({"type": "ttl", "seconds": 3600}, "unknown obligation type"),
+            ({"type": "log", "level": "notice"}, "unknown obligation type"),
+            ({"type": "annotate", "note": "reviewed"}, "unknown obligation type"),
             ({"type": "route"}, "at least one of"),
             ({"type": "route", "require": "eu"}, "must be an object"),
             ({"type": "route", "to": ["a", "b"]}, "logical model name"),
@@ -98,11 +105,8 @@ class TestValidation:
             {"type": "limit", "max_tokens": 500},
             {"type": "watermark", "text": "internal use only"},
             {"type": "require_purpose", "purposes": ["support"]},
-            {"type": "ttl", "seconds": 3600},
             {"type": "route", "to": "eu-only-llm"},
             {"type": "route", "require": {"region": "eu"}},
-            {"type": "log", "level": "notice"},
-            {"type": "annotate", "note": "reviewed"},
         ],
     )
     def test_well_formed_obligations_are_accepted(self, document) -> None:
@@ -132,6 +136,18 @@ class TestExecutorRouting:
         ).executed_by_control_plane
 
     def test_the_schema_advertises_only_what_exists(self) -> None:
-        """GET /v1/policies/schema serves this set, so it must not overpromise."""
-        assert "notify" not in KNOWN_OBLIGATIONS
+        """GET /v1/policies/schema serves this set, so it must not overpromise.
+
+        Pinned in full rather than by absence. Asserting that one removed name is
+        gone says nothing about the next type someone adds, and this file spent
+        three releases asserting exactly that while three unexecuted types sat in
+        the published set.
+        """
+        assert {
+            "redact",
+            "limit",
+            "watermark",
+            "route",
+            "require_purpose",
+        } == KNOWN_OBLIGATIONS
         assert set(OBLIGATION_SPECS) == KNOWN_OBLIGATIONS

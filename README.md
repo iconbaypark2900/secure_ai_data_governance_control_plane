@@ -274,22 +274,28 @@ since that is the first question anyone asks afterwards.
 
 ### 6. Attaches duties that actually bind
 
-An obligation is not advice. Seven types, and every one of them is implemented by
+An obligation is not advice. Five types, and every one of them is carried out by
 something:
 
 | | executed by | |
 |---|---|---|
 | `redact` | control plane | rewrite matching values before returning them |
-| `annotate` `log` `ttl` | control plane | record, raise the log level, bound retention |
 | `limit` | enforcement point | cap tokens in, bytes and results back |
 | `watermark` | enforcement point | mark delivered content so its origin survives a paste |
 | `route` | enforcement point | send the request to a model the policy permits |
 | `require_purpose` | enforcement point | re-check the declared purpose at the point of use |
 
-The list was briefly cut to six: `notify` and `route` were removed because nothing
-implemented them, and `route` came back only once something did — a policy author who read the schema and wrote one got a
-well-formed policy that denied their own traffic. An unknown type is now a 422
-when you write the policy, not a surprise at 3am.
+The list has been cut twice. `notify` and `route` went first, because nothing
+implemented them — a policy author who read the schema and wrote one got a
+well-formed policy that denied their own traffic; `route` came back only once
+something did. Then `annotate`, `log` and `ttl`, which failed the same rule from
+the other end: they were declared as things the control plane did, so an
+enforcement point was told they were already discharged, and the control plane
+had never executed one. That failure is quieter than the first — nobody is
+refused, nothing is logged, the duty simply does not happen — which is why it
+outlived two passes that were looking for the other shape. Reasoning in
+[ADR 0017](docs/adr/0017-the-control-plane-executes-one-obligation.md). An
+unknown type is a 422 when you write the policy, not a surprise at 3am.
 
 The SDK enforces the binding: `decision.enforce()` raises unless the caller has
 declared it can discharge whatever came back, so "allow, but watermark it" can
@@ -591,6 +597,15 @@ is nothing left to route, so the obligation was reported discharged while nothin
 happened. Two enforcement points disagreeing is how the first one's assumption
 became visible. Reasoning in
 [ADR 0016](docs/adr/0016-a-second-enforcement-point-for-tool-calls.md).
+
+The same ledger had a second half, on the control plane's side of the split, and
+it took longer to find because no component was there to disagree with. Three
+obligation types were declared as the control plane's own work, and it did none
+of them: `redact` was always the whole of what it executed. A duty the control
+plane claims is never reported outstanding to anybody, so this one produced no
+error anywhere to notice — it was found by reading the executor column against
+the code rather than by running anything. Reasoning in
+[ADR 0017](docs/adr/0017-the-control-plane-executes-one-obligation.md).
 
 ### Filling the catalog
 

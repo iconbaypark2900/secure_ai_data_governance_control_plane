@@ -2,10 +2,7 @@
   "generated_by": "tools/generate_sdk_contract.py",
   "source": "sdk/python/control_plane_sdk/client.py",
   "satisfied_by_control_plane": [
-    "annotate",
-    "log",
-    "redact",
-    "ttl"
+    "redact"
   ],
   "outcomes": [
     "enforced",

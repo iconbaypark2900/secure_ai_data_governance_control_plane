@@ -136,6 +136,13 @@ jobs:
       # the request body on one side and not the other, the two clients start
       # getting different decisions out of the same policy -- so regenerate it
       # here and fail if it moved.
+      #
+      # The chain this closes now reaches all the way back: a pytest asserts the
+      # Python SDK's SATISFIED_BY_CONTROL_PLANE equals the server's
+      # CONTROL_PLANE_OBLIGATIONS, this step ties the fixture to the SDK, and
+      # contract.test.ts ties the TypeScript Set to the fixture. Before that
+      # first link, all three agreed with each other and none of them agreed
+      # with the code -- see ADR 0017.
       - name: The contract fixture is not stale
         working-directory: .
         run: |

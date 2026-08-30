@@ -29,12 +29,7 @@ export const TERMINAL_APPROVAL_STATES: ReadonlySet<string> = new Set([
  * plane applied them to the payload it returned. Everything else is the
  * enforcement point's own duty and must be declared.
  */
-export const SATISFIED_BY_CONTROL_PLANE: ReadonlySet<string> = new Set([
-  "redact",
-  "annotate",
-  "log",
-  "ttl",
-]);
+export const SATISFIED_BY_CONTROL_PLANE: ReadonlySet<string> = new Set(["redact"]);
 
 export interface Obligation {
   type?: string;

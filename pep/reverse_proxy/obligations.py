@@ -1,7 +1,7 @@
 """Carrying out the obligations the control plane hands to an enforcement point.
 
-Three of the seven obligation types are the enforcement point's job, because
-they act on the transport rather than on the data:
+Four of the five obligation types are the enforcement point's job, because they
+act on the transport rather than on the data:
 
 ``require_purpose``  the purpose asserted at decision time is re-checked here,
                      at the point of use. Duplicating a policy's own

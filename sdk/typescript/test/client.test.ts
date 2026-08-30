@@ -86,7 +86,7 @@ describe("it fails closed", () => {
 describe("obligations are binding", () => {
   const withObligation = {
     ...ALLOW,
-    obligations: [{ type: "watermark", text: "internal" }, { type: "log", level: "info" }],
+    obligations: [{ type: "watermark", text: "internal" }, { type: "redact" }],
   };
 
   it("an undeclared obligation turns an allow into a refusal", async () => {
@@ -108,7 +108,7 @@ describe("obligations are binding", () => {
     const decision = Decision.fromResponse({
       effect: "allow",
       payload: "redacted",
-      obligations: [{ type: "redact" }, { type: "annotate" }, { type: "ttl" }],
+      obligations: [{ type: "redact" }],
     });
     expect(decision.outstanding()).toEqual([]);
   });
@@ -241,14 +241,14 @@ describe("outcomes are reported", () => {
 
   it("reports refused with the undischarged duties when it cannot satisfy one", async () => {
     const { fetch, calls } = stubFetch({
-      responses: [json({ ...ALLOW, obligations: [{ type: "watermark" }, { type: "log" }] }), json({})],
+      responses: [json({ ...ALLOW, obligations: [{ type: "watermark" }, { type: "redact" }] }), json({})],
     });
     const client = new ControlPlaneClient("http://cp.test", { fetch });
     const decision = await client.decide({ principalId: "a", action: "read" });
     await expect(client.enforce(decision)).rejects.toBeInstanceOf(ObligationUnsatisfied);
     expect(calls[1]?.body).toMatchObject({
       outcome: Outcome.REFUSED,
-      discharged: ["log"],
+      discharged: ["redact"],
       undischarged: ["watermark"],
     });
   });
@@ -289,7 +289,7 @@ describe("outcomes are reported", () => {
     // surfacing. Fixed in both clients together.
     const { fetch, calls } = stubFetch({
       responses: [
-        json({ ...ALLOW, obligations: [{ type: "watermark" }, { type: "log" }] }),
+        json({ ...ALLOW, obligations: [{ type: "watermark" }, { type: "redact" }] }),
         json({}),
       ],
     });
@@ -300,7 +300,7 @@ describe("outcomes are reported", () => {
     expect(work).not.toHaveBeenCalled();
     expect(calls[1]?.body).toMatchObject({
       outcome: Outcome.REFUSED,
-      discharged: ["log"],
+      discharged: ["redact"],
       undischarged: ["watermark"],
     });
   });

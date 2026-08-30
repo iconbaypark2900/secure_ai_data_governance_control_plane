@@ -19,6 +19,9 @@ from control_plane_sdk import (
     DecisionDenied,
     ObligationUnsatisfied,
 )
+from control_plane_sdk.client import SATISFIED_BY_CONTROL_PLANE
+
+from control_plane.policy.model import CONTROL_PLANE_OBLIGATIONS
 
 ALLOW_BODY = {
     "effect": "allow",
@@ -35,6 +38,25 @@ def client_with(handler, **kwargs) -> AsyncControlPlaneClient:
     transport = httpx.MockTransport(handler)
     http = httpx.AsyncClient(transport=transport, base_url="http://cp.test")
     return AsyncControlPlaneClient("http://cp.test", "cpk_x_y", client=http, **kwargs)
+
+
+class TestTheSetItSharesWithTheServer:
+    async def test_it_agrees_with_the_server_about_who_applied_what(self) -> None:
+        """The link whose absence let three copies of this set drift.
+
+        The SDK ships separately and cannot import the server, so the set is
+        restated -- and a restated set is one somebody forgets. This test suite
+        is the only place that imports both, which makes it the only place the
+        two can be held together. Downstream of here the chain is already
+        mechanised: contract.json is generated from this constant and CI fails on
+        a stale one, and the TypeScript Set is checked against contract.json.
+
+        Getting this wrong in the permissive direction -- the SDK naming a type
+        the server does not apply -- means enforce() returns a payload for a duty
+        nobody carried out, which is the failure this whole file exists to
+        prevent, arriving through the front door.
+        """
+        assert SATISFIED_BY_CONTROL_PLANE == CONTROL_PLANE_OBLIGATIONS
 
 
 class TestDecisionSemantics:
@@ -496,7 +518,7 @@ class TestOutcomeReporting:
                 json={
                     **ALLOW_BODY,
                     "decision_id": "d_1",
-                    "obligations": [{"type": "watermark"}, {"type": "log"}],
+                    "obligations": [{"type": "watermark"}, {"type": "redact"}],
                 },
             )
 
@@ -509,7 +531,7 @@ class TestOutcomeReporting:
         assert len(posts) == 1
         _, body = posts[0]
         assert body["outcome"] == "refused"
-        assert body["discharged"] == ["log"]
+        assert body["discharged"] == ["redact"]
         assert body["undischarged"] == ["watermark"]
 
     async def test_enforcing_reports_nothing_for_a_denial(self) -> None:

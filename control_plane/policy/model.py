@@ -98,27 +98,25 @@ class ObligationSpec:
 #: than no obligation at all: it validates at authoring time, reaches the
 #: enforcement point as a duty nobody can discharge, and so turns a policy
 #: someone wrote in good faith into a way to deny their own traffic. Two earlier
-#: entries -- ``notify`` and ``route`` -- were removed for exactly that reason.
-#: They need infrastructure this system does not have, and pretending otherwise
-#: was a promise in the schema that nothing behind it kept.
+#: entries -- ``notify`` and ``route`` -- were removed for exactly that reason:
+#: they needed infrastructure this system did not have, and pretending otherwise
+#: was a promise in the schema that nothing behind it kept. ``route`` has since
+#: come back, and is defined below, because ADR 0013 gave it an executor; it is
+#: named here for the history, not as a current absence.
+#:
+#: A third pass removed ``annotate``, ``log`` and ``ttl``. They broke the same
+#: rule from the other side. Declared ``CONTROL_PLANE``, they were reported to
+#: the enforcement point as already discharged -- and nothing in the decision
+#: pipeline had ever executed one. The rule both earlier passes left implicit,
+#: stated here because leaving it to prose is how three types survived two
+#: removals: a ``CONTROL_PLANE`` entry must be a type the decision pipeline
+#: actually executes, the way an ``ENFORCEMENT_POINT`` entry must appear in the
+#: reference proxy's ``SATISFIABLE``. Both halves now have a test. See ADR 0017.
 OBLIGATION_SPECS: dict[str, ObligationSpec] = {
     "redact": ObligationSpec(
         Executor.CONTROL_PLANE,
         "Rewrite matching values before the payload is returned.",
         requires_any=("labels", "classifications"),
-    ),
-    "annotate": ObligationSpec(
-        Executor.CONTROL_PLANE,
-        "Attach a note to the decision, for the record rather than the payload.",
-    ),
-    "log": ObligationSpec(
-        Executor.CONTROL_PLANE,
-        "Record this decision at a raised level.",
-    ),
-    "ttl": ObligationSpec(
-        Executor.CONTROL_PLANE,
-        "How long the permitted data may be retained downstream, in seconds.",
-        requires_any=("seconds",),
     ),
     "limit": ObligationSpec(
         Executor.ENFORCEMENT_POINT,
@@ -203,10 +201,6 @@ class Obligation(BaseModel):
                 raise ValueError("'require_purpose' needs 'purposes' as a list")
             if not purposes:
                 raise ValueError("'require_purpose' with an empty list permits nothing")
-        elif self.type == "ttl":
-            seconds = extras.get("seconds")
-            if not isinstance(seconds, int) or isinstance(seconds, bool) or seconds <= 0:
-                raise ValueError("'ttl' needs 'seconds' as a positive integer")
         elif self.type == "route":
             requirements = extras.get("require")
             if requirements is not None and not isinstance(requirements, dict):

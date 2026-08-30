@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from sqlalchemy import select
 
@@ -10,7 +12,7 @@ from control_plane.catalog.service import CatalogService
 from control_plane.classification.scanner import scan_text
 from control_plane.models.decision import ApprovalRequest, DecisionRecord
 from control_plane.pdp import PolicyDecisionPoint
-from control_plane.policy.model import Policy
+from control_plane.policy.model import CONTROL_PLANE_OBLIGATIONS, Policy
 from control_plane.policy.store import PolicyStore
 from control_plane.schemas.decision import DecideOptions, DecideRequest
 
@@ -280,6 +282,96 @@ class TestFailureModes:
         )
         response = await PolicyDecisionPoint(session).decide(request_for())
         assert "watermark" in response.unsupported_obligations
+
+
+#: One well-formed obligation of each type the control plane claims to execute,
+#: paired with a payload that gives it something to do. A type may not be added
+#: to CONTROL_PLANE_OBLIGATIONS without an entry here, and an entry cannot be
+#: written until an executor exists for the test below to observe. That is the
+#: friction this table is for.
+CONTROL_PLANE_FIXTURES: dict[str, tuple[dict[str, Any], Any]] = {
+    "redact": (
+        {"type": "redact", "labels": ["pii.email"], "strategy": "mask"},
+        "reach jane.doe@acme.com about the refund",
+    ),
+}
+
+
+class TestTheControlPlaneExecutesWhatItClaims:
+    """The twin of the enforcement-point check in tests/unit/test_obligations.py.
+
+    That one holds the ENFORCEMENT_POINT half of ADR 0010's rule against the
+    reference proxy's SATISFIABLE, and has held since 0010 was written. The
+    CONTROL_PLANE half was left to prose, and drifted: `annotate`, `log` and
+    `ttl` sat in the published set for three releases with nothing anywhere
+    executing them. Nobody noticed, because a control-plane obligation is
+    excluded from `unsupported_obligations` and so arrives at an enforcement
+    point already reported as discharged -- the one class of unkept duty that
+    makes no noise at all. See ADR 0017.
+
+    Behavioural on purpose. Reading pdp.py for a dispatch table would pass the
+    first time the dispatch is refactored into something else, and would have
+    passed happily throughout the period this exists to have caught. The only
+    evidence that counts is a response that came back different.
+    """
+
+    @staticmethod
+    def _observable(response: Any) -> tuple[Any, tuple[str, ...]]:
+        """All an enforcement point can see of what the control plane did."""
+        return response.payload, tuple(sorted(r.label for r in response.redactions))
+
+    def test_every_claimed_type_has_something_to_exercise_it(self) -> None:
+        unexercised = CONTROL_PLANE_OBLIGATIONS - set(CONTROL_PLANE_FIXTURES)
+        assert not unexercised, (
+            f"{sorted(unexercised)} is declared CONTROL_PLANE with no fixture "
+            "showing the plane doing anything. Write one, or the type belongs "
+            "with the enforcement point -- or nowhere."
+        )
+
+    async def test_every_control_plane_obligation_visibly_executes(self, session) -> None:
+        await seed(session)
+        store = PolicyStore(session)
+        base = {
+            "principal": {"id": "user:analyst", "type": "user"},
+            "action": "read",
+            "resource": {"urn": "pg://public.customers"},
+        }
+
+        for name in sorted(CONTROL_PLANE_OBLIGATIONS):
+            assert name in CONTROL_PLANE_FIXTURES, name
+            document, payload = CONTROL_PLANE_FIXTURES[name]
+            request = DecideRequest.model_validate({**base, "payload": payload})
+
+            # The same request under an allow that carries no duties at all.
+            untouched = await PolicyDecisionPoint(session).decide(request)
+            assert untouched.effect == "allow", name
+            assert not untouched.obligations, name
+
+            key = f"carry-{name}"
+            await store.create(
+                Policy(
+                    key=key,
+                    name=f"An allow carrying a {name} obligation",
+                    effect="allow",
+                    priority=300,
+                    match={"all": [{"principal.type": "user"}, {"action": "read"}]},
+                    obligations=[document],
+                ),
+                actor="test",
+            )
+            carried = await PolicyDecisionPoint(session).decide(request)
+            await store.delete(key)
+
+            assert carried.effect == "allow", name
+            assert name in {o["type"] for o in carried.obligations}, name
+            # The claim being tested: nobody downstream is told to do this.
+            assert name not in carried.unsupported_obligations, name
+            assert self._observable(carried) != self._observable(untouched), (
+                f"a {name!r} obligation reached an allow and the response came "
+                f"back identical to one carrying no obligation at all. The "
+                f"control plane says it discharges {name!r}; no enforcement "
+                f"point will be told to, so if nothing here does it, nothing does."
+            )
 
 
 class TestScannerIntegration:
