@@ -83,6 +83,7 @@ exclude = ["migrations/", "ui/", "^tests/"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = "-q --strict-markers"
 markers = ["integration: requires a live Postgres database"]
 filterwarnings = ["error::DeprecationWarning:control_plane.*"]
