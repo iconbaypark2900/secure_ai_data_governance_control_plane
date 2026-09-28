@@ -1,0 +1,199 @@
+name: Dependency & Security Audit
+
+on:
+  schedule:
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  security-events: write
+
+env:
+  PIP_RETRIES: 5
+  PIP_TIMEOUT: 120
+
+jobs:
+  security-audit:
+    name: Security Audit
+    runs-on: [ubuntu-latest]
+    container:
+      image: python:3.12-slim
+      options: --network host
+    steps:
+      - name: Setup environment
+        run: |
+          apt-get update -qq && apt-get install -y -qq git curl && rm -rf /var/lib/apt/lists/*
+          python3 -c "import urllib.request; urllib.request.urlretrieve('https://nodejs.org/dist/v20.18.1/node-v20.18.1-linux-x64.tar.gz', '/tmp/node.tar.gz')"
+          tar -xz -C /usr/local --strip-components=1 -f /tmp/node.tar.gz
+          node --version
+          npm --version
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pip-audit
+        run: |
+          pip install --retries 5 --timeout 120 pip-audit || \
+          pip install --retries 10 --timeout 300 pip-audit
+
+      - name: Run vulnerability scan
+        continue-on-error: true
+        run: |
+          if [ -f requirements.txt ]; then
+            pip-audit -r requirements.txt --format json > audit-results.json 2>&1 || true
+          elif [ -f pyproject.toml ]; then
+            pip install . 2>/dev/null || true
+            pip-audit . --format json > audit-results.json 2>&1 || true
+          else
+            echo "No requirements.txt or pyproject.toml found"
+          fi
+
+      - name: Report findings
+        if: always()
+        run: |
+          if [ -f audit-results.json ]; then
+            count=$(python3 -c "import json; d=json.load(open('audit-results.json')); v=d if isinstance(d,list) else d.get('vulnerabilities',[]); print(len(v))" 2>/dev/null || echo 0)
+            echo "Vulnerability count: $count"
+            python3 -c "import json; d=json.load(open('audit-results.json')); v=d if isinstance(d,list) else d.get('vulnerabilities',[]); [print('  - '+str(x.get('description',x.get('id','?')))) for x in v if isinstance(x,dict)]" 2>/dev/null || true
+          else
+            echo "No audit results"
+          fi
+
+      - name: Upload scan results
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-audit-results
+          path: |
+            audit-results.json
+            requirements.txt
+            pyproject.toml
+
+  outdated-check:
+    name: Outdated Packages
+    runs-on: [ubuntu-latest]
+    container:
+      image: python:3.12-slim
+      options: --network host
+    needs: [security-audit]
+    steps:
+      - name: Setup environment
+        run: |
+          apt-get update -qq && apt-get install -y -qq git curl && rm -rf /var/lib/apt/lists/*
+          python3 -c "import urllib.request; urllib.request.urlretrieve('https://nodejs.org/dist/v20.18.1/node-v20.18.1-linux-x64.tar.gz', '/tmp/node.tar.gz')"
+          tar -xz -C /usr/local --strip-components=1 -f /tmp/node.tar.gz
+          node --version
+          npm --version
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        continue-on-error: true
+        run: |
+          if [ -f requirements.txt ]; then
+            pip install --retries 3 --timeout 60 -r requirements.txt 2>/dev/null || echo "Dependency install skipped (optional)"
+          elif [ -f pyproject.toml ]; then
+            pip install --retries 3 --timeout 60 . 2>/dev/null || echo "Dependency install skipped (optional)"
+          fi
+
+      - name: Check for outdated packages
+        continue-on-error: true
+        run: |
+          pip list --outdated --format=json > outdated-packages.json 2>/dev/null || true
+          count=$(python3 -c "import json; print(len(json.load(open('outdated-packages.json'))))" 2>/dev/null || echo 0)
+          echo "Outdated count: $count"
+          python3 -c "import json; [print(f'  - {p[\"name\"]}: {p[\"version\"]} -> {p[\"latest_version\"]}') for p in json.load(open('outdated-packages.json'))]" 2>/dev/null || echo "None"
+
+      - name: Upload report
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v3
+        with:
+          name: outdated-packages
+          path: outdated-packages.json
+
+  dependency-update:
+    name: Auto-update Dependencies
+    runs-on: [ubuntu-latest]
+    container:
+      image: python:3.12-slim
+      options: --network host
+    needs: [outdated-check]
+    if: always() && (needs.outdated-check.result == 'success' || needs.outdated-check.result == 'neutral')
+    steps:
+      - name: Setup environment
+        run: |
+          apt-get update -qq && apt-get install -y -qq git curl && rm -rf /var/lib/apt/lists/*
+          python3 -c "import urllib.request; urllib.request.urlretrieve('https://nodejs.org/dist/v20.18.1/node-v20.18.1-linux-x64.tar.gz', '/tmp/node.tar.gz')"
+          tar -xz -C /usr/local --strip-components=1 -f /tmp/node.tar.gz
+          node --version
+          npm --version
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up git
+        run: |
+          git config --global user.name "forgejo-actions"
+          git config --global user.email "forgejo-actions@localhost"
+
+      - name: Install pip-tools
+        run: |
+          pip install --retries 5 --timeout 120 pip-tools || \
+          pip install --retries 10 --timeout 300 pip-tools
+
+      - name: Update requirements.txt
+        continue-on-error: true
+        run: |
+          if [ -f pyproject.toml ]; then
+            timeout 300 pip-compile --upgrade pyproject.toml --output-file requirements.txt 2>/dev/null || echo "pip-compile failed/skipped for pyproject.toml"
+          elif [ -f requirements.in ]; then
+            timeout 300 pip-compile requirements.in --upgrade --output-file requirements.txt 2>/dev/null || echo "pip-compile failed/skipped for requirements.in"
+          elif [ -f requirements.txt ]; then
+            timeout 300 pip-compile --upgrade --output-file requirements.txt 2>/dev/null || echo "pip-compile failed/skipped for requirements.txt"
+          else
+            echo "No requirements file found"
+            exit 0
+          fi
+
+      - name: Commit and push changes
+        run: |
+          git fetch origin main
+          CHANGED_FILES=""
+          if ! git diff --quiet; then
+            CHANGED_FILES=$(git diff --name-only)
+          fi
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No dependency changes"
+            exit 0
+          fi
+          BRANCH="deps/auto-update-$(date +%Y%m%d)"
+          git checkout -b "$BRANCH" origin/main
+          for f in $CHANGED_FILES; do
+            git checkout main -- "$f" 2>/dev/null || true
+          done
+          git add requirements.txt pyproject.toml 2>/dev/null || true
+          git commit -m "chore(deps): update dependencies" || echo "Nothing to commit"
+          git push --force-with-lease origin "$BRANCH"
+
+      - name: Create pull request
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="deps/auto-update-$(date +%Y%m%d)"
+          curl -s -X POST \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/pulls" \
+            -d "{\"head\":\"${BRANCH}\",\"base\":\"main\",\"title\":\"chore(deps): update dependencies\",\"body\":\"Automated dependency update from weekly CI audit.\"}" && echo "PR created" || echo "PR creation skipped"
