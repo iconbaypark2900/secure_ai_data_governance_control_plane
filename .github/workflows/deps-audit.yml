@@ -4,6 +4,15 @@ on:
   schedule:
     - cron: '0 4 * * 1'
   workflow_dispatch:
+    inputs:
+      agent_task:
+        description: 'Agent task to run (code-review, security-scan, dependency-analysis, refactor-suggestions, docs-generation, test-plans)'
+        required: false
+        default: 'code-review'
+      agent_model:
+        description: 'Ollama model to use (e.g. qwen3.8-27b:latest, granite4-3b:latest, gemma4-26b:latest)'
+        required: false
+        default: 'qwen3.8-27b:latest'
 
 concurrency:
   group: ${{ github.workflow }}
@@ -197,3 +206,190 @@ jobs:
             -H "Content-Type: application/json" \
             "${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/pulls" \
             -d "{\"head\":\"${BRANCH}\",\"base\":\"main\",\"title\":\"chore(deps): update dependencies\",\"body\":\"Automated dependency update from weekly CI audit.\"}" && echo "PR created" || echo "PR creation skipped"
+
+  agent-buildout:
+    name: Agent Buildout (Local LLM)
+    runs-on: [ubuntu-latest]
+    container:
+      image: python:3.12-slim
+      options: --network host
+    needs: [dependency-update]
+    if: always()
+    steps:
+      - name: Setup environment
+        run: |
+          apt-get update -qq && apt-get install -y -qq git curl && rm -rf /var/lib/apt/lists/*
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set agent environment
+        run: |
+          echo "AGENT_TASK=${AGENT_TASK_INPUT:-code-review}" >> "$GITHUB_ENV"
+          echo "AGENT_MODEL=${AGENT_MODEL_INPUT:-qwen3.8-27b:latest}" >> "$GITHUB_ENV"
+          echo "OLLAMA_API=http://127.0.0.1:11434/v1/chat/completions" >> "$GITHUB_ENV"
+          echo "Using task: $AGENT_TASK | model: $AGENT_MODEL"
+        env:
+          AGENT_TASK_INPUT: ${{ github.event.inputs.agent_task }}
+          AGENT_MODEL_INPUT: ${{ github.event.inputs.agent_model }}
+
+      - name: Verify Ollama is reachable
+        run: |
+          python3 -c "
+import urllib.request, json, os, sys
+try:
+    resp = urllib.request.urlopen('http://127.0.0.1:11434/api/tags', timeout=5)
+    data = json.loads(resp.read())
+    models = [m['model'] for m in data.get('models', [])]
+    model = os.environ.get('AGENT_MODEL', 'qwen3.8-27b:latest')
+    if model not in models:
+        print(f'WARNING: requested model {model} not found. Available: {models}')
+    else:
+        print(f'OK: Ollama running with {len(models)} models. Using {model}')
+except Exception as e:
+    print(f'ERROR: Ollama not reachable at http://127.0.0.1:11434: {e}')
+    sys.exit(1)
+"
+
+      - name: Create CI agent script
+        run: |
+          cat > /tmp/ci-agent.py << 'PYEOF'
+#!/usr/bin/env python3
+"""CI Agent — uses local Ollama LLM via API for automated code analysis."""
+import urllib.request, json, os, sys, subprocess, pathlib, time
+
+OLLAMA_API = os.environ.get("OLLAMA_API", "http://127.0.0.1:11434/v1/chat/completions")
+MODEL = os.environ.get("AGENT_MODEL", "qwen3.8-27b:latest")
+TASK = os.environ.get("AGENT_TASK", "code-review")
+
+TASK_PROMPTS = {
+    "code-review": (
+        "You are a senior code reviewer (Claude-level expertise). Analyze the codebase "
+        "and identify: (1) potential bugs, (2) security vulnerabilities, (3) performance issues, "
+        "(4) code quality problems, (5) testing gaps. For each finding include: severity, file, "
+        "line, issue, recommendation. Output as JSON array. If nothing found, output []."),
+    "security-scan": (
+        "You are a security engineer. Analyze the codebase for: dependency vulnerabilities, "
+        "auth/authz issues, input validation, hardcoded secrets, insecure patterns. "
+        "Include: severity, file, line, issue, recommendation. Output JSON."),
+    "dependency-analysis": (
+        "You are a dependency analyst. Analyze the project's dependencies. For each: "
+        "check if outdated, has known CVEs, or is unused. Output JSON with: "
+        "{outdated: [{name, current, latest, risk}], unused: [...], security: [...]}"),
+    "refactor-suggestions": (
+        "You are a refactoring expert. Identify functions too long/complex, duplicated code, "
+        "and opportunities to modularize. Output JSON: {file, function, issue, suggestion, effort}."),
+    "docs-generation": (
+        "You are a technical writer. Generate or improve README.md and docstrings. "
+        "Output markdown content with suggestions."),
+    "test-plans": (
+        "You are a QA engineer. Generate test plans: unit tests for key functions, "
+        "integration test scenarios, edge cases, mock strategies. Output JSON."),
+}
+
+PROMPT = TASK_PROMPTS.get(TASK, TASK_PROMPTS["code-review"])
+
+def collect_context():
+    repo = pathlib.Path(os.environ.get("GITHUB_WORKSPACE", os.getcwd()))
+    parts = []
+    for fname in ["requirements.txt", "pyproject.toml", "setup.py", "README.md"]:
+        f = repo / fname
+        if f.exists():
+            parts.append(f"\n--- {fname} ---\n{f.read_text(errors='replace')[:3000]}")
+    for p in sorted(repo.rglob("*.py")):
+        if any(s in str(p) for s in [".venv","venv","__pycache__","node_modules",".eggs","build","dist"]):
+            continue
+        try:
+            if p.stat().st_size > 5000:
+                continue
+            parts.append(f"\n--- {p.name} ---\n{p.read_text(errors='replace')[:3000]}")
+        except:
+            pass
+        if len(parts) >= 12:
+            break
+    git = ""
+    try:
+        git = subprocess.check_output(["git","log","--oneline","-3"], text=True, stderr=subprocess.DEVNULL)
+    except: pass
+    return "\n".join(parts)[:15000], git
+
+context, git_info = collect_context()
+full_prompt = f"{PROMPT}\n\nRepository context:\n{context}\n\nRecent commits:\n{git_info}"
+
+payload = json.dumps({
+    "model": MODEL,
+    "messages": [
+        {"role": "system", "content": PROMPT},
+        {"role": "user", "content": full_prompt}
+    ],
+    "temperature": 0.3,
+    "max_tokens": 8192,
+    "stream": False
+}).encode()
+
+print(f"[ci-agent] task={TASK} model={MODEL} context={len(context)} chars")
+req = urllib.request.Request(OLLAMA_API, data=payload, headers={"Content-Type":"application/json"}, method="POST")
+try:
+    resp = urllib.request.urlopen(req, timeout=120)
+    result = json.loads(resp.read())
+    output = result["choices"][0]["message"]["content"].strip()
+except Exception as e:
+    print(f"[ci-agent] ERROR: {e}")
+    sys.exit(1)
+
+outdir = pathlib.Path("agent-results")
+outdir.mkdir(exist_ok=True)
+ts = time.strftime("%Y%m%d_%H%M%S")
+(outdir / f"{TASK}_{ts}.txt").write_text(output)
+try:
+    parsed = json.loads(re.sub(r'```(?:json)?\n|```', '', output))
+    (outdir / f"{TASK}_{ts}.json").write_text(json.dumps(parsed, indent=2))
+    if isinstance(parsed, list):
+        print(f"[ci-agent] Findings: {len(parsed)}")
+    elif isinstance(parsed, dict):
+        print(f"[ci-agent] Keys: {list(parsed.keys())}")
+except:
+    print(f"[ci-agent] Output saved as text ({len(output)} chars)")
+
+print(f"[ci-agent] Results saved to agent-results/")
+PYEOF
+
+      - name: Run agent buildout
+        if: always()
+        continue-on-error: true
+        run: |
+          python3 /tmp/ci-agent.py
+          echo "=== Agent buildout complete ==="
+
+      - name: Upload agent results
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v3
+        with:
+          name: agent-results
+          path: |
+            agent-results/
+
+      - name: Create agent buildout PR
+        if: always()
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          rm -rf /tmp/pr-branch
+          git config --global user.name "ci-agent" || true
+          git config --global user.email "ci-agent@local" || true
+          BRANCH="agent/buildout-$(date +%Y%m%d_%H%M%S)"
+          git checkout -b "$BRANCH" 2>/dev/null || git checkout "$BRANCH"
+          git add agent-results/ 2>/dev/null || true
+          CHANGES=$(git status --porcelain)
+          if [ -z "$CHANGES" ]; then
+            echo "No changes to commit from agent buildout"
+          else
+            git commit -m "chore(agent): automated ${AGENT_TASK} analysis with ${AGENT_MODEL}" 2>/dev/null || true
+            git push --force-with-lease -u origin "$BRANCH" 2>/dev/null || echo "Push skipped"
+            echo "Agent PR branch: $BRANCH"
+          fi
