@@ -6,11 +6,11 @@ on:
   workflow_dispatch:
     inputs:
       agent_task:
-        description: 'Agent task to run (code-review, security-scan, dependency-analysis, refactor-suggestions, docs-generation, test-plans)'
+        description: 'Agent task to run (code-review, security-scan, dependency-analysis)'
         required: false
         default: 'code-review'
       agent_model:
-        description: 'Ollama model to use (e.g. qwen3.8-27b:latest, granite4-3b:latest, gemma4-26b:latest)'
+        description: 'Ollama model to use'
         required: false
         default: 'qwen3.8-27b:latest'
 
@@ -150,7 +150,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: "${{ secrets.GITHUB_TOKEN }}"
 
       - name: Set up git
         run: |
@@ -198,7 +198,7 @@ jobs:
 
       - name: Create pull request
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
         run: |
           BRANCH="deps/auto-update-$(date +%Y%m%d)"
           curl -s -X POST \
@@ -215,6 +215,9 @@ jobs:
       options: --network host
     needs: [dependency-update]
     if: always()
+    env:
+      AGENT_TASK: code-review
+      AGENT_MODEL: qwen3.8-27b:latest
     steps:
       - name: Setup environment
         run: |
@@ -224,138 +227,29 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: "${{ secrets.GITHUB_TOKEN }}"
 
       - name: Set agent environment
         run: |
           echo "AGENT_TASK=${AGENT_TASK_INPUT:-code-review}" >> "$GITHUB_ENV"
           echo "AGENT_MODEL=${AGENT_MODEL_INPUT:-qwen3.8-27b:latest}" >> "$GITHUB_ENV"
-          echo "OLLAMA_API=http://127.0.0.1:11434/v1/chat/completions" >> "$GITHUB_ENV"
+          echo "OLLAMA_API=http://127.0.0.1:11434" >> "$GITHUB_ENV"
           echo "Using task: $AGENT_TASK | model: $AGENT_MODEL"
         env:
-          AGENT_TASK_INPUT: ${{ github.event.inputs.agent_task }}
-          AGENT_MODEL_INPUT: ${{ github.event.inputs.agent_model }}
+          AGENT_TASK_INPUT: "${{ github.event.inputs.agent_task }}"
+          AGENT_MODEL_INPUT: "${{ github.event.inputs.agent_model }}"
 
       - name: Verify Ollama is reachable
         run: |
-          python3 -c "
-import urllib.request, json, os, sys
-try:
-    resp = urllib.request.urlopen('http://127.0.0.1:11434/api/tags', timeout=5)
-    data = json.loads(resp.read())
-    models = [m['model'] for m in data.get('models', [])]
-    model = os.environ.get('AGENT_MODEL', 'qwen3.8-27b:latest')
-    if model not in models:
-        print(f'WARNING: requested model {model} not found. Available: {models}')
-    else:
-        print(f'OK: Ollama running with {len(models)} models. Using {model}')
-except Exception as e:
-    print(f'ERROR: Ollama not reachable at http://127.0.0.1:11434: {e}')
-    sys.exit(1)
-"
+          curl -sf "http://127.0.0.1:11434/api/tags" > /dev/null && echo "OK: Ollama is running" || { echo "ERROR: Ollama not reachable at http://127.0.0.1:11434"; exit 1; }
+          MODEL="${AGENT_MODEL:-qwen3.8-27b:latest}"
+          curl -sf "http://127.0.0.1:11434/api/tags" | python3 -c "import sys,json; d=json.load(sys.stdin); models=[m['model'] for m in d.get('models',[])]; print('Available models:', ', '.join(models)); print('Using:', '$MODEL')"
 
       - name: Create CI agent script
         run: |
-          cat > /tmp/ci-agent.py << 'PYEOF'
-#!/usr/bin/env python3
-"""CI Agent — uses local Ollama LLM via API for automated code analysis."""
-import urllib.request, json, os, sys, subprocess, pathlib, time
-
-OLLAMA_API = os.environ.get("OLLAMA_API", "http://127.0.0.1:11434/v1/chat/completions")
-MODEL = os.environ.get("AGENT_MODEL", "qwen3.8-27b:latest")
-TASK = os.environ.get("AGENT_TASK", "code-review")
-
-TASK_PROMPTS = {
-    "code-review": (
-        "You are a senior code reviewer (Claude-level expertise). Analyze the codebase "
-        "and identify: (1) potential bugs, (2) security vulnerabilities, (3) performance issues, "
-        "(4) code quality problems, (5) testing gaps. For each finding include: severity, file, "
-        "line, issue, recommendation. Output as JSON array. If nothing found, output []."),
-    "security-scan": (
-        "You are a security engineer. Analyze the codebase for: dependency vulnerabilities, "
-        "auth/authz issues, input validation, hardcoded secrets, insecure patterns. "
-        "Include: severity, file, line, issue, recommendation. Output JSON."),
-    "dependency-analysis": (
-        "You are a dependency analyst. Analyze the project's dependencies. For each: "
-        "check if outdated, has known CVEs, or is unused. Output JSON with: "
-        "{outdated: [{name, current, latest, risk}], unused: [...], security: [...]}"),
-    "refactor-suggestions": (
-        "You are a refactoring expert. Identify functions too long/complex, duplicated code, "
-        "and opportunities to modularize. Output JSON: {file, function, issue, suggestion, effort}."),
-    "docs-generation": (
-        "You are a technical writer. Generate or improve README.md and docstrings. "
-        "Output markdown content with suggestions."),
-    "test-plans": (
-        "You are a QA engineer. Generate test plans: unit tests for key functions, "
-        "integration test scenarios, edge cases, mock strategies. Output JSON."),
-}
-
-PROMPT = TASK_PROMPTS.get(TASK, TASK_PROMPTS["code-review"])
-
-def collect_context():
-    repo = pathlib.Path(os.environ.get("GITHUB_WORKSPACE", os.getcwd()))
-    parts = []
-    for fname in ["requirements.txt", "pyproject.toml", "setup.py", "README.md"]:
-        f = repo / fname
-        if f.exists():
-            parts.append(f"\n--- {fname} ---\n{f.read_text(errors='replace')[:3000]}")
-    for p in sorted(repo.rglob("*.py")):
-        if any(s in str(p) for s in [".venv","venv","__pycache__","node_modules",".eggs","build","dist"]):
-            continue
-        try:
-            if p.stat().st_size > 5000:
-                continue
-            parts.append(f"\n--- {p.name} ---\n{p.read_text(errors='replace')[:3000]}")
-        except:
-            pass
-        if len(parts) >= 12:
-            break
-    git = ""
-    try:
-        git = subprocess.check_output(["git","log","--oneline","-3"], text=True, stderr=subprocess.DEVNULL)
-    except: pass
-    return "\n".join(parts)[:15000], git
-
-context, git_info = collect_context()
-full_prompt = f"{PROMPT}\n\nRepository context:\n{context}\n\nRecent commits:\n{git_info}"
-
-payload = json.dumps({
-    "model": MODEL,
-    "messages": [
-        {"role": "system", "content": PROMPT},
-        {"role": "user", "content": full_prompt}
-    ],
-    "temperature": 0.3,
-    "max_tokens": 8192,
-    "stream": False
-}).encode()
-
-print(f"[ci-agent] task={TASK} model={MODEL} context={len(context)} chars")
-req = urllib.request.Request(OLLAMA_API, data=payload, headers={"Content-Type":"application/json"}, method="POST")
-try:
-    resp = urllib.request.urlopen(req, timeout=120)
-    result = json.loads(resp.read())
-    output = result["choices"][0]["message"]["content"].strip()
-except Exception as e:
-    print(f"[ci-agent] ERROR: {e}")
-    sys.exit(1)
-
-outdir = pathlib.Path("agent-results")
-outdir.mkdir(exist_ok=True)
-ts = time.strftime("%Y%m%d_%H%M%S")
-(outdir / f"{TASK}_{ts}.txt").write_text(output)
-try:
-    parsed = json.loads(re.sub(r'```(?:json)?\n|```', '', output))
-    (outdir / f"{TASK}_{ts}.json").write_text(json.dumps(parsed, indent=2))
-    if isinstance(parsed, list):
-        print(f"[ci-agent] Findings: {len(parsed)}")
-    elif isinstance(parsed, dict):
-        print(f"[ci-agent] Keys: {list(parsed.keys())}")
-except:
-    print(f"[ci-agent] Output saved as text ({len(output)} chars)")
-
-print(f"[ci-agent] Results saved to agent-results/")
-PYEOF
+          echo "IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwppbXBvcnQgdXJsbGliLnJlcXVlc3QsIGpzb24sIG9zLCBzeXMsIHN1YnByb2Nlc3MsIHBhdGhsaWIsIHRpbWUsIHJlCgpPTExBTUFfQVBJID0gb3MuZW52aXJvbi5nZXQoIk9MTEFNQV9BUEkiLCAiaHR0cDovLzEyNy4wLjAuMToxMTQzNCIpCk1PREVMID0gb3MuZW52aXJvbi5nZXQoIkFHRU5UX01PREVMIiwgInF3ZW4zLjgtMjdiOmxhdGVzdCIpClRBU0sgPSBvcy5lbnZpcm9uLmdldCgiQUdFTlRfVEFTSyIsICJjb2RlLXJldmlldyIpCgpUQVNLX1BST01QVFMgPSB7CiAgICAiY29kZS1yZXZpZXciOiAiWW91IGFyZSBhIHNlbmlvciBjb2RlIHJldmlld2VyLiBBbmFseXplIHRoZSBjb2RlYmFzZSBhbmQgaWRlbnRpZnk6ICgxKSBwb3RlbnRpYWwgYnVncywgKDIpIHNlY3VyaXR5IHZ1bG5lcmFiaWxpdGllcywgKDMpIHBlcmZvcm1hbmNlIGlzc3VlcywgKDQpIGNvZGUgcXVhbGl0eSBwcm9ibGVtcywgKDUpIHRlc3RpbmcgZ2Fwcy4gRm9yIGVhY2ggZmluZGluZyBpbmNsdWRlOiBzZXZlcml0eSwgZmlsZSwgbGluZSwgaXNzdWUsIHJlY29tbWVuZGF0aW9uLiBPdXRwdXQgYXMgSlNPTiBhcnJheS4gSWYgbm90aGluZyBmb3VuZCwgb3V0cHV0IFtdLiIsCiAgICAic2VjdXJpdHktc2NhbiI6ICJZb3UgYXJlIGEgc2VjdXJpdHkgZW5naW5lZXIuIEFuYWx5emUgdGhlIGNvZGViYXNlIGZvcjogZGVwZW5kZW5jeSB2dWxuZXJhYmlsaXRpZXMsIGF1dGgvYXV0aHogaXNzdWVzLCBpbnB1dCB2YWxpZGF0aW9uLCBoYXJkY29kZWQgc2VjcmV0cywgaW5zZWN1cmUgcGF0dGVybnMuIEluY2x1ZGU6IHNldmVyaXR5LCBmaWxlLCBsaW5lLCBpc3N1ZSwgcmVjb21tZW5kYXRpb24uIE91dHB1dCBKU09OLiIsCiAgICAiZGVwZW5kZW5jeS1hbmFseXNpcyI6ICJZb3UgYXJlIGEgZGVwZW5kZW5jeSBhbmFseXN0LiBBbmFseXplIGRlcGVuZGVuY2llcy4gQ2hlY2sgaWYgb3V0ZGF0ZWQgb3IgaGFzIGtub3duIENWRXMuIE91dHB1dCBKU09OOiB7b3V0ZGF0ZWQ6W3tuYW1lLGN1cnJlbnQsbGF0ZXN0LHJpc2t9XSwgdW51c2VkOlsuLi5dLCBzZWN1cml0eTpbLi4uXX0uIiwKfQpQUk9NUFQgPSBUQVNLX1BST01QVFMuZ2V0KFRBU0ssIFRBU0tfUFJPTVBUU1siY29kZS1yZXZpZXciXSkKCmRlZiBjb2xsZWN0X2NvbnRleHQoKToKICAgIHJlcG8gPSBwYXRobGliLlBhdGgob3MuZW52aXJvbi5nZXQoIkdJVEhVQl9XT1JLU1BBQ0UiLCBvcy5nZXRjd2QoKSkpCiAgICBwYXJ0cyA9IFtdCiAgICBmb3IgZm5hbWUgaW4gWyJyZXF1aXJlbWVudHMudHh0IiwgInB5cHJvamVjdC50b21sIiwgInNldHVwLnB5IiwgIlJFQURNRS5tZCJdOgogICAgICAgIGYgPSByZXBvIC8gZm5hbWUKICAgICAgICBpZiBmLmV4aXN0cygpOgogICAgICAgICAgICBwYXJ0cy5hcHBlbmQoZiJcbi0tLSB7Zm5hbWV9IC0tLVxue2YucmVhZF90ZXh0KGVycm9ycz0ncmVwbGFjZScpWzozMDAwXX0iKQogICAgZm9yIHAgaW4gc29ydGVkKHJlcG8ucmdsb2IoIioucHkiKSk6CiAgICAgICAgaWYgYW55KHMgaW4gc3RyKHApIGZvciBzIGluIFsiLnZlbnYiLCJ2ZW52IiwiX19weWNhY2hlX18iLCJub2RlX21vZHVsZXMiLCIuZWdncyIsImJ1aWxkIiwiZGlzdCJdKToKICAgICAgICAgICAgY29udGludWUKICAgICAgICB0cnk6CiAgICAgICAgICAgIGlmIHAuc3RhdCgpLnN0X3NpemUgPiA1MDAwOgogICAgICAgICAgICAgICAgY29udGludWUKICAgICAgICAgICAgcGFydHMuYXBwZW5kKGYiXG4tLS0ge3AubmFtZX0gLS0tXG57cC5yZWFkX3RleHQoZXJyb3JzPSdyZXBsYWNlJylbOjMwMDBdfSIpCiAgICAgICAgZXhjZXB0OgogICAgICAgICAgICBwYXNzCiAgICAgICAgaWYgbGVuKHBhcnRzKSA+PSAxMjoKICAgICAgICAgICAgYnJlYWsKICAgIGdpdCA9ICIiCiAgICB0cnk6CiAgICAgICAgZ2l0ID0gc3VicHJvY2Vzcy5jaGVja19vdXRwdXQoWyJnaXQiLCJsb2ciLCItLW9uZWxpbmUiLCItMyJdLCB0ZXh0PVRydWUsIHN0ZGVycj1zdWJwcm9jZXNzLkRFVk5VTEwpCiAgICBleGNlcHQ6CiAgICAgICAgcGFzcwogICAgcmV0dXJuICJcbiIuam9pbihwYXJ0cylbOjE1MDAwXSwgZ2l0Cgpjb250ZXh0LCBnaXRfaW5mbyA9IGNvbGxlY3RfY29udGV4dCgpCmZ1bGxfcHJvbXB0ID0gZiJ7UFJPTVBUfVxuXG5SZXBvc2l0b3J5IGNvbnRleHQ6XG57Y29udGV4dH1cblxuUmVjZW50IGNvbW1pdHM6XG57Z2l0X2luZm99IgoKcGF5bG9hZCA9IGpzb24uZHVtcHMoewogICAgIm1vZGVsIjogTU9ERUwsCiAgICAibWVzc2FnZXMiOiBbCiAgICAgICAgeyJyb2xlIjogInN5c3RlbSIsICJjb250ZW50IjogUFJPTVBUfSwKICAgICAgICB7InJvbGUiOiAidXNlciIsICJjb250ZW50IjogZnVsbF9wcm9tcHR9CiAgICBdLAogICAgInRlbXBlcmF0dXJlIjogMC4zLAogICAgIm1heF90b2tlbnMiOiA4MTkyLAogICAgInN0cmVhbSI6IEZhbHNlCn0pLmVuY29kZSgpCgpwcmludChmIltjaS1hZ2VudF0gdGFzaz17VEFTS30gbW9kZWw9e01PREVMfSBjb250ZXh0PXtsZW4oY29udGV4dCl9IGNoYXJzIikKYXBpX3VybCA9IGYie09MTEFNQV9BUEl9L3YxL2NoYXQvY29tcGxldGlvbnMiCnJlcSA9IHVybGxpYi5yZXF1ZXN0LlJlcXVlc3QoYXBpX3VybCwgZGF0YT1wYXlsb2FkLCBoZWFkZXJzPXsiQ29udGVudC1UeXBlIjoiYXBwbGljYXRpb24vanNvbiJ9LCBtZXRob2Q9IlBPU1QiKQp0cnk6CiAgICByZXNwID0gdXJsbGliLnJlcXVlc3QudXJsb3BlbihyZXEsIHRpbWVvdXQ9MTIwKQogICAgcmVzdWx0ID0ganNvbi5sb2FkcyhyZXNwLnJlYWQoKSkKICAgIG91dHB1dCA9IHJlc3VsdFsiY2hvaWNlcyJdWzBdWyJtZXNzYWdlIl1bImNvbnRlbnQiXS5zdHJpcCgpCmV4Y2VwdCBFeGNlcHRpb24gYXMgZToKICAgIHByaW50KGYiW2NpLWFnZW50XSBFUlJPUjoge2V9IikKICAgIHN5cy5leGl0KDEpCgpvdXRkaXIgPSBwYXRobGliLlBhdGgoImFnZW50LXJlc3VsdHMiKQpvdXRkaXIubWtkaXIoZXhpc3Rfb2s9VHJ1ZSkKdHMgPSB0aW1lLnN0cmZ0aW1lKCIlWSVtJWRfJUglTSVTIikKKG91dGRpciAvIGYie1RBU0t9X3t0c30udHh0Iikud3JpdGVfdGV4dChvdXRwdXQpCnRyeToKICAgIHBhcnNlZCA9IGpzb24ubG9hZHMocmUuc3ViKHInYGBgKD86anNvbik/XG58YGBgJywgJycsIG91dHB1dCkpCiAgICAob3V0ZGlyIC8gZiJ7VEFTS31fe3RzfS5qc29uIikud3JpdGVfdGV4dChqc29uLmR1bXBzKHBhcnNlZCwgaW5kZW50PTIpKQogICAgaWYgaXNpbnN0YW5jZShwYXJzZWQsIGxpc3QpOgogICAgICAgIHByaW50KGYiW2NpLWFnZW50XSBGaW5kaW5nczoge2xlbihwYXJzZWQpfSIpCiAgICBlbGlmIGlzaW5zdGFuY2UocGFyc2VkLCBkaWN0KToKICAgICAgICBwcmludChmIltjaS1hZ2VudF0gS2V5czoge2xpc3QocGFyc2VkLmtleXMoKSl9IikKZXhjZXB0OgogICAgcHJpbnQoZiJbY2ktYWdlbnRdIE91dHB1dCBzYXZlZCBhcyB0ZXh0ICh7bGVuKG91dHB1dCl9IGNoYXJzKSIpCnByaW50KGYiW2NpLWFnZW50XSBSZXN1bHRzIHNhdmVkIHRvIGFnZW50LXJlc3VsdHMvIikK" | base64 -d > /tmp/ci-agent.py
+          chmod +x /tmp/ci-agent.py
+          echo "=== Agent script created ==="
 
       - name: Run agent buildout
         if: always()
@@ -377,13 +271,12 @@ PYEOF
         if: always()
         continue-on-error: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
         run: |
-          rm -rf /tmp/pr-branch
-          git config --global user.name "ci-agent" || true
-          git config --global user.email "ci-agent@local" || true
+          git config --global user.name "ci-agent" 2>/dev/null || true
+          git config --global user.email "ci-agent@local" 2>/dev/null || true
           BRANCH="agent/buildout-$(date +%Y%m%d_%H%M%S)"
-          git checkout -b "$BRANCH" 2>/dev/null || git checkout "$BRANCH"
+          git checkout -b "$BRANCH" 2>/dev/null || git checkout "$BRANCH" 2>/dev/null || true
           git add agent-results/ 2>/dev/null || true
           CHANGES=$(git status --porcelain)
           if [ -z "$CHANGES" ]; then
